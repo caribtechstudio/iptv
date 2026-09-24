@@ -12,14 +12,27 @@
 .video-wrap:not(:has(video[src])) .player-controls{display:none}
 .player-controls button{background:#151b18bd;color:white;border:0;border-radius:6px;padding:5px 8px;min-width:29px;font-size:13px}
 .player-controls button:hover{background:#39433a}
+.player-controls button.subtitle-active{background:#b7ee7d;color:#16200e;font-weight:750}
+.player-controls button.subtitle-active:hover{background:#c9fa9b}
 .player-controls input[type=range]{accent-color:#b7ee7d}
 #seek{display:block;width:100%;height:13px;margin:0 0 5px}
 .controls-row{display:flex;align-items:center;gap:5px}
 .controls-spacer{flex:1}
 #timeLabel{font-variant-numeric:tabular-nums;font-size:11px;color:#e4e9e3;white-space:nowrap;margin-left:4px}
-#volume{width:70px;height:12px}
+#volume{width:48px;height:12px}
+#qualityOptions{min-width:43px;white-space:nowrap;font-size:11px;font-weight:700}
 .subtitle-overlay{position:absolute;z-index:2;left:3%;right:3%;text-align:center;white-space:pre-line;pointer-events:none;color:#fff;font-size:100%;font-weight:650;line-height:1.3;text-shadow:0 2px 3px #000,0 0 8px #000;background:transparent;transform:translateZ(0)}
+.youtube-source video,.youtube-source .player-controls{display:none}
+.youtube-playback{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;background:radial-gradient(circle at center,#202922,#0e1110 75%)}
+.youtube-playback strong{font-size:18px;color:#e2e9e3}
+.youtube-playback p{max-width:330px;margin:0;color:#a4ada6;font-size:13px;line-height:1.5}
+.youtube-playback button{margin-top:4px}
+.player-meta .external-action{margin-top:10px}
 .field select{width:100%;border:1px solid #454d48;background:#151818;border-radius:8px;color:#fff;padding:11px;outline:none;font-size:13px}
+.field>label{font-size:12px;font-weight:650;color:#dce5db}
+.paste-field-row{display:flex;gap:8px}
+.paste-field-row input{width:auto;min-width:0;flex:1}
+.paste-field-row button{flex:none;padding:9px 12px}
 .field input[type=range]{accent-color:#b7ee7d;padding:0;border:0;background:none}
 .episode-button{display:block;width:100%;text-align:left;border:1px solid #39413c;background:#292e2b;color:#e9eee9;border-radius:8px;padding:11px 12px;margin:6px 0;font-size:12px}
 .episode-button:hover{background:#344036}

@@ -6,23 +6,57 @@ use iptv_core::{
     Channel, Library, Playlist, Program, RecentItem, XtreamAccount, is_hls_manifest, now_iso,
     parse_m3u, parse_xmltv,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tauri::{AppHandle, Manager};
 
 const MAX_PLAYLIST_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_EPG_BYTES: u64 = 60 * 1024 * 1024;
+const MAX_YOUTUBE_PAGE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_HLS_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 struct Store {
     path: PathBuf,
     library: Mutex<Library>,
     programs: Mutex<Vec<Program>>,
+}
+
+struct YoutubePlayerState {
+    generation: AtomicU64,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct YoutubeBounds {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl YoutubeBounds {
+    fn rect(self) -> Result<tauri::Rect, String> {
+        if ![self.x, self.y, self.width, self.height]
+            .iter()
+            .all(|value| value.is_finite())
+            || self.width <= 0.0
+            || self.height <= 0.0
+        {
+            return Err("Zone de lecture YouTube invalide.".into());
+        }
+        Ok(tauri::Rect {
+            position: tauri::Position::Logical(tauri::LogicalPosition::new(self.x, self.y)),
+            size: tauri::Size::Logical(tauri::LogicalSize::new(self.width, self.height)),
+        })
+    }
 }
 
 impl Store {
@@ -120,11 +154,12 @@ fn read_source(source: &str, limit: u64) -> Result<String, String> {
 
 fn import_channels(source: &str) -> Result<Vec<iptv_core::Channel>, String> {
     let text = read_source(source, MAX_PLAYLIST_BYTES)?;
-    if is_hls_manifest(&text) {
-        return Err(
-            "Cette adresse est un flux HLS. Utilise « Lire une URL » pour le lancer.".into(),
-        );
-    }
+    catalog_channels(source, &text)?.ok_or_else(|| {
+        "Cette adresse est un flux HLS. Utilise « Lire une URL » pour le lancer.".into()
+    })
+}
+
+fn parse_playlist_channels(source: &str, text: &str) -> Result<Vec<iptv_core::Channel>, String> {
     let base = if source.starts_with("http") {
         Some(source.to_owned())
     } else {
@@ -132,7 +167,274 @@ fn import_channels(source: &str) -> Result<Vec<iptv_core::Channel>, String> {
             .ok()
             .map(|url| url.to_string())
     };
-    parse_m3u(&text, base.as_deref())
+    parse_m3u(text, base.as_deref())
+}
+
+fn catalog_channels(source: &str, text: &str) -> Result<Option<Vec<Channel>>, String> {
+    if is_hls_manifest(text) {
+        Ok(None)
+    } else {
+        parse_playlist_channels(source, text).map(Some)
+    }
+}
+
+fn is_youtube_url(source: &str) -> bool {
+    url::Url::parse(source).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && matches!(
+                url.host_str(),
+                Some("youtube.com" | "www.youtube.com" | "m.youtube.com" | "youtu.be")
+            )
+    })
+}
+
+fn youtube_video_id_from_url(source: &str) -> Option<String> {
+    if !is_youtube_url(source) {
+        return None;
+    }
+    let url = url::Url::parse(source).ok()?;
+    let segments: Vec<_> = url
+        .path_segments()?
+        .filter(|part| !part.is_empty())
+        .collect();
+    let candidate = if url.host_str() == Some("youtu.be") {
+        segments.first().copied()
+    } else if segments.first() == Some(&"watch") {
+        return url
+            .query_pairs()
+            .find(|(key, _)| key == "v")
+            .map(|(_, value)| value.into_owned())
+            .filter(|id| valid_youtube_video_id(id));
+    } else if matches!(segments.first(), Some(&"live" | &"shorts" | &"embed")) {
+        segments.get(1).copied()
+    } else {
+        None
+    }?;
+    valid_youtube_video_id(candidate).then(|| candidate.to_owned())
+}
+
+fn valid_youtube_video_id(id: &str) -> bool {
+    id.len() == 11
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn youtube_video_id_from_html(html: &str) -> Option<String> {
+    for marker in [
+        "<link rel=\"canonical\" href=\"",
+        "<meta property=\"og:url\" content=\"",
+    ] {
+        if let Some(candidate) = html
+            .split_once(marker)
+            .and_then(|(_, rest)| rest.split('"').next())
+            && let Some(id) = youtube_video_id_from_url(candidate)
+        {
+            return Some(id);
+        }
+    }
+    None
+}
+
+fn resolve_youtube_video_id(source: &str) -> Result<String, String> {
+    if !is_youtube_url(source) {
+        return Err("Cette adresse n’est pas une page YouTube valide.".into());
+    }
+    if let Some(id) = youtube_video_id_from_url(source) {
+        return Ok(id);
+    }
+    let html = read_source(source, MAX_YOUTUBE_PAGE_BYTES)?;
+    youtube_video_id_from_html(&html)
+        .ok_or_else(|| "Aucune vidéo YouTube intégrable trouvée pour cette chaîne.".into())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HlsManifest {
+    url: String,
+    text: String,
+}
+
+#[tauri::command]
+async fn fetch_hls_manifest(source: String) -> Result<HlsManifest, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let parsed = url::Url::parse(&source).map_err(|_| "Adresse HLS invalide.")?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err("Le flux HLS doit utiliser HTTP ou HTTPS.".into());
+        }
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(12))
+            .user_agent("Fluxo/0.3")
+            .build()
+            .map_err(|error| error.to_string())?
+            .get(parsed)
+            .send()
+            .and_then(|response| response.error_for_status())
+            .map_err(|error| format!("Playlist HLS indisponible : {error}"))?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_HLS_MANIFEST_BYTES)
+        {
+            return Err("Playlist HLS trop volumineuse.".into());
+        }
+        let url = response.url().to_string();
+        let mut bytes = Vec::new();
+        response
+            .take(MAX_HLS_MANIFEST_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() as u64 > MAX_HLS_MANIFEST_BYTES {
+            return Err("Playlist HLS trop volumineuse.".into());
+        }
+        let text =
+            String::from_utf8(bytes).map_err(|_| "La playlist HLS n’est pas encodée en UTF-8.")?;
+        if !text.trim_start_matches('\u{feff}').starts_with("#EXTM3U") {
+            return Err("Cette adresse ne renvoie pas une playlist HLS.".into());
+        }
+        Ok(HlsManifest { url, text })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn open_youtube_player(
+    app: AppHandle,
+    url: String,
+    bounds: YoutubeBounds,
+) -> Result<u64, String> {
+    let generation = app
+        .state::<YoutubePlayerState>()
+        .generation
+        .fetch_add(1, Ordering::SeqCst)
+        + 1;
+    let video_id = tauri::async_runtime::spawn_blocking(move || resolve_youtube_video_id(&url))
+        .await
+        .map_err(|error| error.to_string())??;
+
+    if app
+        .state::<YoutubePlayerState>()
+        .generation
+        .load(Ordering::SeqCst)
+        != generation
+    {
+        return Ok(0);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let player = if let Some(webview) = app.get_webview("youtube-player") {
+            webview
+        } else {
+            let main = app
+                .get_window("main")
+                .ok_or("Fenêtre principale introuvable.")?;
+            main.add_child(
+                tauri::webview::WebviewBuilder::new(
+                    "youtube-player",
+                    tauri::WebviewUrl::App("youtube-loading.html".into()),
+                ),
+                tauri::LogicalPosition::new(bounds.x, bounds.y),
+                tauri::LogicalSize::new(bounds.width, bounds.height),
+            )
+            .map_err(|error| error.to_string())?
+        };
+        player
+            .set_bounds(bounds.rect()?)
+            .map_err(|error| error.to_string())?;
+        let embed_url =
+            format!("https://www.youtube.com/embed/{video_id}?autoplay=1&playsinline=1");
+        player
+            .with_webview(move |webview| unsafe {
+                use objc2_foundation::{NSMutableURLRequest, NSString, NSURL};
+                let view: &objc2_web_kit::WKWebView = &*webview.inner().cast();
+                let url = NSURL::URLWithString(&NSString::from_str(&embed_url))
+                    .expect("L’adresse YouTube construite est valide");
+                let request = NSMutableURLRequest::requestWithURL(&url);
+                request.setValue_forHTTPHeaderField(
+                    Some(&NSString::from_str("https://app.fluxo.iptv")),
+                    &NSString::from_str("Referer"),
+                );
+                view.loadRequest(&request);
+            })
+            .map_err(|error| error.to_string())?;
+        player.show().map_err(|error| error.to_string())?;
+        Ok(generation)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, bounds, video_id);
+        Err("Le lecteur YouTube intégré est disponible sur macOS.".into())
+    }
+}
+
+#[tauri::command]
+fn set_youtube_player_bounds(
+    app: AppHandle,
+    session: u64,
+    bounds: Option<YoutubeBounds>,
+) -> Result<(), String> {
+    if app
+        .state::<YoutubePlayerState>()
+        .generation
+        .load(Ordering::SeqCst)
+        != session
+    {
+        return Ok(());
+    }
+    if let Some(player) = app.get_webview("youtube-player") {
+        if let Some(bounds) = bounds {
+            player
+                .set_bounds(bounds.rect()?)
+                .map_err(|error| error.to_string())?;
+            player.show().map_err(|error| error.to_string())?;
+        } else {
+            player.hide().map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_youtube_player(app: AppHandle) -> Result<(), String> {
+    app.state::<YoutubePlayerState>()
+        .generation
+        .fetch_add(1, Ordering::SeqCst);
+    if let Some(player) = app.get_webview("youtube-player") {
+        player.hide().map_err(|error| error.to_string())?;
+        #[cfg(target_os = "macos")]
+        player
+            .with_webview(|webview| unsafe {
+                let view: &objc2_web_kit::WKWebView = &*webview.inner().cast();
+                view.stopLoading();
+                view.loadHTMLString_baseURL(&objc2_foundation::NSString::from_str(""), None);
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn save_playlist(
+    store: &Store,
+    name: String,
+    source: String,
+    channels: Vec<Channel>,
+) -> Result<Playlist, String> {
+    let playlist = Playlist {
+        id: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos()
+            .to_string(),
+        name,
+        source,
+        channels,
+        updated_at: now_iso(),
+    };
+    store.change(|library| {
+        library.playlists.push(playlist.clone());
+        Ok(playlist)
+    })
 }
 
 #[tauri::command]
@@ -156,23 +458,31 @@ async fn add_playlist(app: AppHandle, name: String, source: String) -> Result<Pl
     tauri::async_runtime::spawn_blocking(move || {
         let channels = import_channels(&source)?;
         let store = app_clone.state::<Store>();
-        let playlist = Playlist {
-            id: format!(
-                "{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| e.to_string())?
-                    .as_nanos()
-            ),
-            name,
-            source,
-            channels,
-            updated_at: now_iso(),
+        save_playlist(&store, name, source, channels)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn add_playlist_if_catalog(
+    app: AppHandle,
+    name: String,
+    source: String,
+) -> Result<Option<Playlist>, String> {
+    let name = name.trim().to_owned();
+    let source = source.trim().to_owned();
+    if name.is_empty() || source.is_empty() {
+        return Err("Indique un nom et une source.".into());
+    }
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let text = read_source(&source, MAX_PLAYLIST_BYTES)?;
+        let Some(channels) = catalog_channels(&source, &text)? else {
+            return Ok(None);
         };
-        store.change(|library| {
-            library.playlists.push(playlist.clone());
-            Ok(playlist)
-        })
+        let store = app_clone.state::<Store>();
+        save_playlist(&store, name, source, channels).map(Some)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -556,12 +866,17 @@ fn read_subtitle(path: String) -> Result<String, String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
         .setup(|app| {
             let path = app.path().app_data_dir()?.join("library.json");
             app.manage(Store::load(path));
+            app.manage(YoutubePlayerState {
+                generation: AtomicU64::new(0),
+            });
             let source = app
                 .state::<Store>()
                 .library
@@ -587,6 +902,11 @@ pub fn run() {
             resolve_stream,
             get_series_episodes,
             add_playlist,
+            add_playlist_if_catalog,
+            fetch_hls_manifest,
+            open_youtube_player,
+            set_youtube_player_bounds,
+            hide_youtube_player,
             import_local_media,
             refresh_playlist,
             remove_playlist,
@@ -599,4 +919,43 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("Impossible de lancer Fluxo");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{catalog_channels, youtube_video_id_from_html, youtube_video_id_from_url};
+
+    #[test]
+    fn m3u8_url_distinguishes_channel_catalog_from_hls_video() {
+        let source = "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8";
+        let catalog = "#EXTM3U x-tvg-url=\"https://example.org/guide.xml\"\n#EXTINF:-1 tvg-id=\"Kanali7.al\" group-title=\"Albania\",Kanali 7\nhttps://example.org/live/kanali7.m3u8";
+        let channels = catalog_channels(source, catalog).unwrap().unwrap();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].name, "Kanali 7");
+        assert_eq!(channels[0].group, "Albania");
+        assert_eq!(
+            channels[0].stream_url,
+            "https://example.org/live/kanali7.m3u8"
+        );
+
+        let hls = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsegment.ts";
+        assert!(catalog_channels(source, hls).unwrap().is_none());
+    }
+
+    #[test]
+    fn youtube_live_page_resolves_to_a_safe_video_id() {
+        let html = "<link rel=\"canonical\" href=\"https://www.youtube.com/watch?v=NiRIbKwAejk\">";
+        assert_eq!(
+            youtube_video_id_from_html(html).as_deref(),
+            Some("NiRIbKwAejk")
+        );
+        assert_eq!(
+            youtube_video_id_from_url("https://youtu.be/NiRIbKwAejk").as_deref(),
+            Some("NiRIbKwAejk")
+        );
+        assert!(
+            youtube_video_id_from_url("https://youtube.com.evil.example/watch?v=NiRIbKwAejk")
+                .is_none()
+        );
+    }
 }
