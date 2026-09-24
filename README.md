@@ -25,6 +25,7 @@ Ouvrez ensuite `Fluxo.app` dans ce dossier. Cette application est destinée à �
 - Dans **Sources & guide TV**, connectez un compte Xtream Codes avec son serveur, son utilisateur et son mot de passe. Fluxo importe les chaînes en direct, films et séries ; un clic sur une série affiche ses épisodes. Le mot de passe reste dans le trousseau macOS et n’est pas écrit dans la bibliothèque JSON. La lecture résout l’adresse du flux seulement au moment de l’ouverture.
 - Ajoutez un guide XMLTV local ou distant pour afficher les programmes associés aux identifiants `tvg-id`.
 - Ouvrez une URL de flux, un fichier audio ou une vidéo locale.
+- Glissez un ou plusieurs fichiers audio/vidéo, ou un dossier contenant des vidéos, dans la fenêtre. Fluxo les ajoute à **Médias locaux** et lance le premier fichier. La liste **À suivre** permet de passer au précédent ou au suivant ; la lecture continue automatiquement au fichier suivant. Le bouton **Ouvrir des médias** accepte aussi plusieurs fichiers.
 - Passez en **Mode lecteur** pour agrandir l’image, ou utilisez le bouton plein écran. Les commandes incluent lecture/pause, saut de 10 secondes, position, volume, vitesse et image dans l’image quand macOS l’autorise. Les raccourcis `Espace`, `←`, `→` et `F` agissent lorsque le focus n’est pas dans un champ.
 - Dans les **Options du lecteur**, sélectionnez une piste audio ou de sous-titres si le média en fournit, ou chargez un fichier SRT/VTT UTF-8. Réglez la taille et la hauteur des sous-titres ; ces réglages sont mémorisés sur ce Mac.
 
@@ -46,3 +47,4 @@ Les flux DRM (FairPlay, Widevine, PlayReady) ne sont pas encore pris en charge. 
 - `scripts/verify.sh` : format Rust, tests Rust et sous-titres, Clippy, contrôle JavaScript et construction de l’interface.
 
 La bibliothèque locale est enregistrée dans les données de l’application macOS. Les fichiers multimédias et sous-titres sélectionnés restent à leur emplacement d’origine. La vérification est aussi exécutée par GitHub Actions à chaque envoi de code.
+Les dossiers déposés sont parcourus jusqu’à huit niveaux et l’import est limité à 500 médias par dépôt. Les fichiers ne sont pas copiés ; s’ils sont déplacés ou supprimés, leur entrée dans la bibliothèque devra être retirée ou réimportée.

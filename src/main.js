@@ -19,18 +19,19 @@ app.innerHTML = `
       <div class="sidebar-bottom"><button id="settingsButton">⚙ <span>Sources & guide TV</span></button></div>
     </aside>
     <main class="main">
-      <header class="topbar"><div><div class="eyebrow">VOTRE LECTEUR</div><h1 id="viewTitle">Toutes les chaînes</h1></div><div class="top-actions"><button id="playerMode" class="subtle" title="Agrandir le lecteur">Mode lecteur</button><button id="openMedia" class="subtle">Ouvrir un média</button><button id="playUrl" class="primary">＋ Lire une URL</button></div></header>
+      <header class="topbar"><div><div class="eyebrow">VOTRE LECTEUR</div><h1 id="viewTitle">Toutes les chaînes</h1></div><div class="top-actions"><button id="playerMode" class="subtle" title="Agrandir le lecteur">Mode lecteur</button><button id="openMedia" class="subtle">Ouvrir des médias</button><button id="playUrl" class="primary">＋ Lire une URL</button></div></header>
       <div class="content">
         <section class="catalogue"><div class="search-wrap"><span>⌕</span><input id="search" type="search" placeholder="Rechercher une chaîne ou un groupe…" aria-label="Rechercher"></div><div class="filters"><div id="groupFilters" class="group-filters"></div><span id="channelCount"></span></div><div id="channels" class="channels"></div></section>
-        <section class="player-pane"><div class="player-card"><div class="video-wrap" id="videoWrap"><video id="video" playsinline preload="metadata"></video><div id="subtitleOverlay" class="subtitle-overlay" aria-live="off"></div><div id="videoEmpty" class="video-empty"><div class="empty-glyph">▶</div><strong>Prêt à regarder</strong><span>Choisissez une chaîne ou ouvrez un média.</span></div><div class="player-controls" id="playerControls"><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Position de lecture"><div class="controls-row"><button id="togglePlay" title="Lecture / pause" aria-label="Lecture / pause">▶</button><button id="back10" title="Reculer de 10 secondes" aria-label="Reculer de 10 secondes">−10</button><button id="forward10" title="Avancer de 10 secondes" aria-label="Avancer de 10 secondes">+10</button><span id="timeLabel">00:00 / 00:00</span><div class="controls-spacer"></div><button id="mute" title="Couper le son" aria-label="Couper le son">◖))</button><input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume"><button id="playerOptions" title="Options du lecteur">⚙</button><button id="pip" title="Image dans l’image" aria-label="Image dans l’image">▣</button><button id="fullscreen" title="Plein écran" aria-label="Plein écran">⛶</button></div></div></div><div class="player-meta"><div class="live-indicator" id="liveIndicator">LECTEUR</div><div class="player-title-row"><h2 id="playingTitle">Aucune lecture</h2><button id="favoriteButton" title="Ajouter aux favoris" aria-label="Ajouter aux favoris" hidden>☆</button></div><p id="playingDetail">La vidéo et l’audio se lisent ici.</p><p id="playerError" role="alert"></p></div></div><div class="guide-card"><div class="guide-header"><h3>Programme TV</h3><span id="guideStatus">Ajoutez un guide XMLTV</span></div><div id="programs" class="programs"><p class="muted">Sélectionnez une chaîne pour voir son programme.</p></div></div></section>
+        <section class="player-pane"><div class="player-card"><div class="video-wrap" id="videoWrap"><video id="video" playsinline preload="metadata"></video><div id="subtitleOverlay" class="subtitle-overlay" aria-live="off"></div><div id="videoEmpty" class="video-empty"><div class="empty-glyph">▶</div><strong>Prêt à regarder</strong><span>Choisissez une chaîne ou glissez des vidéos ici.</span></div><div class="player-controls" id="playerControls"><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Position de lecture"><div class="controls-row"><button id="togglePlay" title="Lecture / pause" aria-label="Lecture / pause">▶</button><button id="back10" title="Reculer de 10 secondes" aria-label="Reculer de 10 secondes">−10</button><button id="forward10" title="Avancer de 10 secondes" aria-label="Avancer de 10 secondes">+10</button><span id="timeLabel">00:00 / 00:00</span><div class="controls-spacer"></div><button id="mute" title="Couper le son" aria-label="Couper le son">◖))</button><input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume"><button id="playerOptions" title="Options du lecteur">⚙</button><button id="pip" title="Image dans l’image" aria-label="Image dans l’image">▣</button><button id="fullscreen" title="Plein écran" aria-label="Plein écran">⛶</button></div></div></div><div class="player-meta"><div class="live-indicator" id="liveIndicator">LECTEUR</div><div class="player-title-row"><h2 id="playingTitle">Aucune lecture</h2><button id="favoriteButton" title="Ajouter aux favoris" aria-label="Ajouter aux favoris" hidden>☆</button></div><p id="playingDetail">La vidéo et l’audio se lisent ici.</p><p id="playerError" role="alert"></p></div></div><div id="queueCard" class="queue-card" hidden><div class="queue-head"><div><h3>À suivre</h3><span id="queueCount"></span></div><div class="queue-actions"><button id="queuePrevious" aria-label="Média précédent" title="Média précédent">←</button><button id="queueNext" aria-label="Média suivant" title="Média suivant">→</button><button id="queueClear" title="Effacer la file">Effacer</button></div></div><div id="queueItems" class="queue-items"></div></div><div class="guide-card"><div class="guide-header"><h3>Programme TV</h3><span id="guideStatus">Ajoutez un guide XMLTV</span></div><div id="programs" class="programs"><p class="muted">Sélectionnez une chaîne pour voir son programme.</p></div></div></section>
       </div>
     </main>
   </div>
+  <div id="dropOverlay" class="drop-overlay" hidden><div><strong>Déposez vos médias</strong><span>Vidéos, fichiers audio ou dossier de vidéos</span></div></div>
   <div id="modal" class="modal-backdrop" hidden><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-head"><h2 id="modalTitle"></h2><button id="modalClose" class="close" aria-label="Fermer">×</button></div><div id="modalBody"></div></div></div>
   <div id="toast" role="status" aria-live="polite"></div>`;
 
 const $ = (id) => document.getElementById(id);
-const state = { library: { playlists: [], favorites: [], recent: [], epgSource: null, xtreamAccounts: [] }, view: 'all', group: 'Tous', query: '', playing: null, subtitleCues: [], subtitleTrack: 'off' };
+const state = { library: { playlists: [], favorites: [], recent: [], epgSource: null, xtreamAccounts: [] }, view: 'all', group: 'Tous', query: '', playing: null, subtitleCues: [], subtitleTrack: 'off', queue: [], queueIndex: -1 };
 const video = $('video');
 let toastTimer;
 const subtitleSettings = (() => {
@@ -53,6 +54,25 @@ function toast(message, kind = '') {
 function errorMessage(error) { return typeof error === 'string' ? error : error?.message || String(error); }
 async function refreshLibrary() { state.library = await invoke('get_library'); render(); }
 function allChannels() { return state.library.playlists.flatMap((playlist) => playlist.channels); }
+function sortedMedia(channels) { return [...channels].sort((a, b) => a.name.localeCompare(b.name, 'fr', { numeric: true, sensitivity: 'base' })); }
+function renderQueue() {
+  $('queueCard').hidden = state.queue.length === 0;
+  $('queueCount').textContent = `${state.queue.length} média${state.queue.length > 1 ? 's' : ''}`;
+  $('queuePrevious').disabled = state.queueIndex <= 0;
+  $('queueNext').disabled = state.queueIndex < 0 || state.queueIndex >= state.queue.length - 1;
+  const list = $('queueItems'); list.replaceChildren();
+  state.queue.forEach((item, index) => {
+    const row = make('button', `queue-item${index === state.queueIndex ? ' active' : ''}`);
+    row.append(make('span', 'queue-number', String(index + 1)), make('span', 'queue-name', item.name));
+    row.title = item.name; row.onclick = () => playQueueIndex(index); list.append(row);
+  });
+}
+function clearQueue() { state.queue = []; state.queueIndex = -1; renderQueue(); }
+async function playQueueIndex(index) {
+  if (index < 0 || index >= state.queue.length) return;
+  state.queueIndex = index; renderQueue();
+  await playChannel(state.queue[index], true);
+}
 function currentChannels() {
   if (state.view === 'recent') return state.library.recent.map((item) => allChannels().find((channel) => channel.streamUrl === item.url) || ({ id: `recent|${item.url}`, name: item.name, group: 'Récents', streamUrl: item.url, kind: item.url.includes('/episode/') ? 'episode' : 'live', containerExtension: item.containerExtension }));
   let channels = allChannels();
@@ -113,8 +133,16 @@ function render() {
 }
 function setView(view) { state.view = view; state.group = 'Tous'; state.query = ''; $('search').value = ''; $('channels').scrollTop = 0; render(); }
 async function toggleFavorite(id) { try { await invoke('toggle_favorite', { id }); await refreshLibrary(); } catch (error) { toast(errorMessage(error), 'error'); } }
-async function playChannel(channel) {
+async function playChannel(channel, fromQueue = false) {
   try {
+    if (!fromQueue) {
+      if (channel.streamUrl.startsWith('file:')) {
+        const local = state.library.playlists.find((playlist) => playlist.id === 'local-media')?.channels || [];
+        state.queue = sortedMedia(local.filter((item) => item.group === channel.group));
+        state.queueIndex = state.queue.findIndex((item) => item.streamUrl === channel.streamUrl);
+        renderQueue();
+      } else clearQueue();
+    }
     if (channel.kind === 'series') { await showEpisodes(channel); return; }
     let url = channel.streamUrl;
     if (url.startsWith('xtream://')) url = await invoke('resolve_stream', { reference: url, extension: channel.containerExtension || null });
@@ -123,7 +151,8 @@ async function playChannel(channel) {
       url = convertFileSrc(await invoke('allow_media_file', { path }));
     }
     await playSource(url, channel.name, channel.id.startsWith('recent|') ? null : channel.id, channel.tvgId, channel.streamUrl, channel.kind, channel.containerExtension);
-  } catch (error) { toast(errorMessage(error), 'error'); }
+    return true;
+  } catch (error) { toast(errorMessage(error), 'error'); return false; }
 }
 async function playSource(url, name, channelId = null, tvgId = null, recentUrl = url, kind = 'movie', extension = null) {
   video.pause(); video.removeAttribute('src'); video.load();
@@ -202,7 +231,7 @@ function showPlayUrl() {
   modal('Lire une URL', (body) => {
     body.append(make('p', 'modal-intro', 'Ouvrez un flux HLS, une vidéo ou un fichier audio en ligne.'));
     const source = field('Adresse du média', 'https://…/video.m3u8'); body.append(source.label);
-    body.append(button('Lancer la lecture', 'primary full', async () => { const value = source.input.value.trim(); if (!/^https?:\/\//i.test(value)) { toast('Entrez une adresse HTTP ou HTTPS.', 'error'); return; } closeModal(); await playSource(value, new URL(value).pathname.split('/').pop() || 'Média en ligne'); }));
+    body.append(button('Lancer la lecture', 'primary full', async () => { const value = source.input.value.trim(); if (!/^https?:\/\//i.test(value)) { toast('Entrez une adresse HTTP ou HTTPS.', 'error'); return; } closeModal(); clearQueue(); await playSource(value, new URL(value).pathname.split('/').pop() || 'Média en ligne'); }));
   });
 }
 function showSettings() {
@@ -215,14 +244,24 @@ function showSettings() {
     body.append(button('Enregistrer le guide TV', 'primary full', async (event) => { const target = event.currentTarget; target.disabled = true; try { const count = await invoke('set_epg_source', { source: epg.input.value }); await refreshLibrary(); toast(`${count} programmes chargés.`); if (state.playing?.tvgId) renderPrograms(state.playing.tvgId); } catch (error) { toast(errorMessage(error), 'error'); } finally { target.disabled = false; } }));
     const heading = make('h3', 'settings-heading', 'Playlists'); body.append(heading);
     for (const playlist of state.library.playlists) {
-      const row = make('div', 'settings-row'); const info = make('div'); info.append(make('strong', '', playlist.name), make('small', '', `${playlist.channels.length} chaîne${playlist.channels.length > 1 ? 's' : ''}`));
-      row.append(info, button('↻', 'icon-button', async () => { try { const updated = await invoke('refresh_playlist', { id: playlist.id }); await refreshLibrary(); toast(`${updated.channels.length} médias actualisés.`); } catch (error) { toast(errorMessage(error), 'error'); } }), button('×', 'icon-button danger', async () => { if (!window.confirm(`Supprimer « ${playlist.name} » ?`)) return; await invoke('remove_playlist', { id: playlist.id }); if (state.view === playlist.id) state.view = 'all'; await refreshLibrary(); showSettings(); })); body.append(row);
+      const row = make('div', 'settings-row'); const info = make('div'); info.append(make('strong', '', playlist.name), make('small', '', `${playlist.channels.length} média${playlist.channels.length > 1 ? 's' : ''}`));
+      row.append(info, button('↻', 'icon-button', async () => { try { const updated = await invoke('refresh_playlist', { id: playlist.id }); await refreshLibrary(); toast(`${updated.channels.length} médias actualisés.`); } catch (error) { toast(errorMessage(error), 'error'); } }), button('×', 'icon-button danger', async () => { if (!window.confirm(`Supprimer « ${playlist.name} » ?`)) return; await invoke('remove_playlist', { id: playlist.id }); if (playlist.id === 'local-media') { clearQueue(); if (state.playing?.url.startsWith('file:')) state.playing.channelId = null; } if (state.view === playlist.id) state.view = 'all'; await refreshLibrary(); showSettings(); })); body.append(row);
     }
   });
 }
 async function openMedia() {
-  try { const path = await open({ multiple: false, filters: [{ name: 'Audio et vidéo', extensions: ['mp4', 'm4v', 'mov', 'mp3', 'm4a', 'aac', 'wav', 'aiff', 'webm', 'mkv', 'flac', 'ogg', 'ts', 'avi'] }] }); if (!path) return; const allowed = await invoke('allow_media_file', { path }); await playSource(convertFileSrc(allowed), path.split('/').pop(), null, null, new URL(`file://${allowed}`).toString()); }
+  try { const paths = await open({ multiple: true, filters: [{ name: 'Audio et vidéo', extensions: ['mp4', 'm4v', 'mov', 'mp3', 'm4a', 'aac', 'wav', 'aiff', 'aif', 'webm', 'mkv', 'flac', 'ogg', 'opus', 'ts', 'avi', 'mpg', 'mpeg'] }] }); if (!paths) return; await importLocalMedia(Array.isArray(paths) ? paths : [paths]); }
   catch (error) { toast(errorMessage(error), 'error'); }
+}
+async function importLocalMedia(paths) {
+  $('dropOverlay').hidden = true;
+  if (!paths.length) return;
+  const result = await invoke('import_local_media', { paths });
+  await refreshLibrary(); setView(result.playlist.id);
+  state.queue = sortedMedia(result.channels); state.queueIndex = 0; renderQueue();
+  await playQueueIndex(0);
+  const extra = result.truncated ? ' Limite de 500 médias atteinte.' : result.skipped ? ` ${result.skipped} fichier${result.skipped > 1 ? 's' : ''} ignoré${result.skipped > 1 ? 's' : ''}.` : '';
+  toast(`${result.channels.length} média${result.channels.length > 1 ? 's' : ''} ajouté${result.channels.length > 1 ? 's' : ''}.${extra}`);
 }
 function timeText(value) {
   if (!Number.isFinite(value)) return '00:00';
@@ -317,6 +356,9 @@ getCurrentWindow().onResized(async () => {
 }).catch(() => {});
 $('addPlaylistShortcut').onclick = showAddPlaylist; $('settingsButton').onclick = showSettings; $('playUrl').onclick = showPlayUrl; $('openMedia').onclick = openMedia;
 $('playerMode').onclick = togglePlayerMode;
+$('queuePrevious').onclick = () => playQueueIndex(state.queueIndex - 1);
+$('queueNext').onclick = () => playQueueIndex(state.queueIndex + 1);
+$('queueClear').onclick = clearQueue;
 $('togglePlay').onclick = () => { if (video.paused) video.play(); else video.pause(); };
 $('back10').onclick = () => { video.currentTime = Math.max(0, video.currentTime - 10); };
 $('forward10').onclick = () => { video.currentTime = Math.min(video.duration, video.currentTime + 10); };
@@ -346,6 +388,17 @@ document.addEventListener('keydown', (event) => {
 });
 for (const name of ['timeupdate', 'loadedmetadata', 'durationchange', 'play', 'pause', 'volumechange']) video.addEventListener(name, () => { updateControls(); renderSubtitles(); });
 video.addEventListener('playing', () => { $('playerError').textContent = ''; updateControls(); });
+video.addEventListener('ended', () => { if (state.queueIndex >= 0 && state.queueIndex + 1 < state.queue.length) playQueueIndex(state.queueIndex + 1); });
 video.textTracks?.addEventListener?.('addtrack', (event) => { event.track.mode = 'disabled'; event.track.addEventListener('cuechange', renderSubtitles); });
 video.addEventListener('error', () => { if (video.src) $('playerError').textContent = 'Ce flux ou ce format ne peut pas être lu par le moteur multimédia de macOS.'; });
+getCurrentWindow().onDragDropEvent(async (event) => {
+  const { type } = event.payload;
+  if (type === 'enter') $('dropOverlay').hidden = !event.payload.paths?.length;
+  if (type === 'leave') $('dropOverlay').hidden = true;
+  if (type === 'drop') {
+    $('dropOverlay').hidden = true;
+    try { await importLocalMedia(event.payload.paths); }
+    catch (error) { toast(errorMessage(error), 'error'); }
+  }
+}).catch((error) => toast(`Glisser-déposer indisponible : ${errorMessage(error)}`, 'error'));
 refreshLibrary().catch((error) => toast(errorMessage(error), 'error'));

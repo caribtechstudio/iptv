@@ -1,10 +1,12 @@
+mod local_media;
 mod xtream;
 
 use flate2::read::GzDecoder;
 use iptv_core::{
-    Library, Playlist, Program, RecentItem, XtreamAccount, is_hls_manifest, now_iso, parse_m3u,
-    parse_xmltv,
+    Channel, Library, Playlist, Program, RecentItem, XtreamAccount, is_hls_manifest, now_iso,
+    parse_m3u, parse_xmltv,
 };
+use serde::Serialize;
 use std::{
     fs,
     io::Read,
@@ -191,7 +193,26 @@ async fn refresh_playlist(app: AppHandle, id: String) -> Result<Playlist, String
             .ok_or("Playlist introuvable.")?
             .source
             .clone();
-        let channels = if source.starts_with("xtream://") {
+        let channels = if source == local_media::PLAYLIST_SOURCE {
+            store
+                .library
+                .lock()
+                .map_err(|e| e.to_string())?
+                .playlists
+                .iter()
+                .find(|item| item.id == id)
+                .ok_or("Médias locaux introuvables.")?
+                .channels
+                .iter()
+                .filter(|channel| {
+                    url::Url::parse(&channel.stream_url)
+                        .ok()
+                        .and_then(|url| url.to_file_path().ok())
+                        .is_some_and(|path| path.is_file())
+                })
+                .cloned()
+                .collect()
+        } else if source.starts_with("xtream://") {
             let account = store
                 .library
                 .lock()
@@ -220,6 +241,61 @@ async fn refresh_playlist(app: AppHandle, id: String) -> Result<Playlist, String
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalImport {
+    playlist: Playlist,
+    channels: Vec<Channel>,
+    skipped: usize,
+    truncated: bool,
+}
+
+#[tauri::command]
+async fn import_local_media(app: AppHandle, paths: Vec<String>) -> Result<LocalImport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let scan = local_media::scan(&paths)?;
+        let playlist = app.state::<Store>().change(|library| {
+            let playlist = if let Some(playlist) = library
+                .playlists
+                .iter_mut()
+                .find(|item| item.id == local_media::PLAYLIST_ID)
+            {
+                let mut seen: std::collections::HashSet<String> = playlist
+                    .channels
+                    .iter()
+                    .map(|item| item.stream_url.clone())
+                    .collect();
+                for channel in &scan.channels {
+                    if seen.insert(channel.stream_url.clone()) {
+                        playlist.channels.push(channel.clone());
+                    }
+                }
+                playlist.updated_at = now_iso();
+                playlist.clone()
+            } else {
+                let playlist = Playlist {
+                    id: local_media::PLAYLIST_ID.into(),
+                    name: "Médias locaux".into(),
+                    source: local_media::PLAYLIST_SOURCE.into(),
+                    channels: scan.channels.clone(),
+                    updated_at: now_iso(),
+                };
+                library.playlists.push(playlist.clone());
+                playlist
+            };
+            Ok(playlist)
+        })?;
+        Ok(LocalImport {
+            playlist,
+            channels: scan.channels,
+            skipped: scan.skipped,
+            truncated: scan.truncated,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn remove_playlist(app: AppHandle, id: String) -> Result<(), String> {
     let account = app
@@ -232,6 +308,26 @@ fn remove_playlist(app: AppHandle, id: String) -> Result<(), String> {
         .find(|item| item.id == id)
         .cloned();
     app.state::<Store>().change(|library| {
+        if id == local_media::PLAYLIST_ID {
+            let local_ids: std::collections::HashSet<_> = library
+                .playlists
+                .iter()
+                .find(|playlist| playlist.id == id)
+                .map(|playlist| {
+                    playlist
+                        .channels
+                        .iter()
+                        .map(|channel| channel.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            library
+                .favorites
+                .retain(|favorite| !local_ids.contains(favorite));
+            library
+                .recent
+                .retain(|recent| !local_ids.contains(&recent.url));
+        }
         library.playlists.retain(|item| item.id != id);
         library.xtream_accounts.retain(|item| item.id != id);
         library
@@ -491,6 +587,7 @@ pub fn run() {
             resolve_stream,
             get_series_episodes,
             add_playlist,
+            import_local_media,
             refresh_playlist,
             remove_playlist,
             toggle_favorite,
