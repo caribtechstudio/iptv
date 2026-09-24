@@ -39,6 +39,8 @@ Le lecteur intégré utilise le moteur multimédia de macOS. HLS, MP4/MOV, MP3, 
 
 Une playlist peut contenir des pages web, des flux DASH, des liens expirés ou des chaînes restreintes à certains pays. L’import d’une chaîne ne garantit pas que son fournisseur autorise sa lecture sur ce Mac et à cet emplacement.
 
+Si une lecture échoue, Fluxo vérifie la réponse du serveur et affiche, lorsqu’il est disponible, le motif concret : accès refusé (HTTP 403), adresse absente (HTTP 404), serveur indisponible ou délai dépassé. Une réponse valide peut encore échouer si les segments, les codecs ou les protections du flux ne sont pas pris en charge.
+
 Les sous-titres SRT/VTT externes et les pistes annoncées par le média sont pris en charge dans le lecteur. La disponibilité des pistes HLS dépend de WebKit. Les réglages de position et de taille s’appliquent au rendu de sous-titres de Fluxo.
 
 Le choix manuel de qualité HLS recharge brièvement le flux. Les variantes dont l’audio ou les sous-titres dépendent d’une playlist séparée restent en mode automatique pour conserver ces pistes. Les fichiers vidéo et les flux qui n’annoncent aucune variante n’affichent pas de choix de résolution.

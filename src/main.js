@@ -46,6 +46,7 @@ youtubePlayback.append(youtubeStatus, youtubeDetail, youtubeRetry);
 $('videoWrap').append(youtubePlayback);
 let youtubeSession = 0;
 let youtubeBoundsFrame = 0;
+let playbackFailureId = 0;
 const openSourceExternally = button('Ouvrir dans le navigateur', 'subtle external-action', openCurrentSourceExternally);
 openSourceExternally.hidden = true; $('playerError').after(openSourceExternally);
 let toastTimer;
@@ -67,6 +68,30 @@ function toast(message, kind = '') {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), 4200);
 }
 function errorMessage(error) { return typeof error === 'string' ? error : error?.message || String(error); }
+function playbackErrorMessage(error) {
+  switch (video.error?.code) {
+    case 2: return 'Une erreur réseau a interrompu la lecture.';
+    case 3: return 'Le flux reçu ne peut pas être décodé par macOS.';
+    case 4: return 'Le format de ce flux n’est pas reconnu par macOS.';
+    default: return error?.name === 'NotSupportedError'
+      ? 'Ce format n’est pas pris en charge par macOS.'
+      : 'La lecture de ce flux a échoué.';
+  }
+}
+function showPlaybackFailure(error) {
+  const requestId = ++playbackFailureId;
+  const playing = state.playing;
+  const source = video.currentSrc || video.src;
+  const fallback = playbackErrorMessage(error);
+  openSourceExternally.hidden = !isWebUrl(playing?.url);
+  if (!isWebUrl(source)) { $('playerError').textContent = fallback; return; }
+  $('playerError').textContent = 'Vérification de la réponse du serveur…';
+  invoke('diagnose_stream', { source }).then((diagnosis) => {
+    if (requestId === playbackFailureId && playing === state.playing) $('playerError').textContent = diagnosis || fallback;
+  }).catch(() => {
+    if (requestId === playbackFailureId && playing === state.playing) $('playerError').textContent = fallback;
+  });
+}
 function youtubeBounds() {
   if (!$('modal').hidden || !$('dropOverlay').hidden) return null;
   const rect = $('videoWrap').getBoundingClientRect();
@@ -284,6 +309,7 @@ async function playChannel(channel, fromQueue = false) {
   } catch (error) { toast(errorMessage(error), 'error'); return false; }
 }
 async function playSource(url, name, channelId = null, tvgId = null, recentUrl = url, kind = 'movie', extension = null) {
+  playbackFailureId += 1;
   resetQuality(isHlsMediaUrl(url) ? url : null);
   video.pause(); video.removeAttribute('src'); video.load();
   $('videoEmpty').hidden = true; $('playerError').textContent = ''; openSourceExternally.hidden = true;
@@ -302,12 +328,10 @@ async function playSource(url, name, channelId = null, tvgId = null, recentUrl =
   else {
     video.src = url; video.load();
     if (quality.source) void discoverQualities(url, state.playing);
+    const playing = state.playing;
     try { await video.play(); }
     catch (error) {
-      if (!['NotAllowedError', 'AbortError'].includes(error?.name)) {
-        $('playerError').textContent = 'Lecture impossible. Vérifiez le format ou l’adresse du flux.';
-        openSourceExternally.hidden = !isWebUrl(recentUrl);
-      }
+      if (state.playing === playing && !video.error && !['NotAllowedError', 'AbortError'].includes(error?.name)) showPlaybackFailure(error);
     }
   }
   try { await invoke('record_recent', { name, url: recentUrl, extension }); await refreshLibrary(); } catch (error) { toast(errorMessage(error), 'error'); }
@@ -591,14 +615,13 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'ArrowRight' && Number.isFinite(video.duration)) video.currentTime = Math.min(video.duration, video.currentTime + 10);
 });
 for (const name of ['timeupdate', 'loadedmetadata', 'durationchange', 'play', 'pause', 'volumechange']) video.addEventListener(name, () => { updateControls(); renderSubtitles(); });
-video.addEventListener('playing', () => { $('playerError').textContent = ''; openSourceExternally.hidden = true; updateControls(); });
+video.addEventListener('playing', () => { playbackFailureId += 1; $('playerError').textContent = ''; openSourceExternally.hidden = true; updateControls(); });
 video.addEventListener('ended', () => { if (state.queueIndex >= 0 && state.queueIndex + 1 < state.queue.length) playQueueIndex(state.queueIndex + 1); });
 video.textTracks?.addEventListener?.('addtrack', (event) => { event.track.mode = 'disabled'; event.track.addEventListener('cuechange', renderSubtitles); });
 video.addEventListener('error', () => {
   if (!video.src || $('videoWrap').classList.contains('youtube-source')) return;
   if (quality.selected !== 'auto') { fallbackQuality(); return; }
-  $('playerError').textContent = 'Ce flux ou ce format ne peut pas être lu par le moteur multimédia de macOS.';
-  openSourceExternally.hidden = !isWebUrl(state.playing?.url);
+  showPlaybackFailure();
 });
 getCurrentWindow().onDragDropEvent(async (event) => {
   const { type } = event.payload;

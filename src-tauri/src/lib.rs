@@ -297,6 +297,90 @@ async fn fetch_hls_manifest(source: String) -> Result<HlsManifest, String> {
     .map_err(|error| error.to_string())?
 }
 
+fn diagnose_stream_url(source: &str) -> Result<Option<String>, String> {
+    let parsed = url::Url::parse(source).map_err(|_| "Adresse du flux invalide.")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Le diagnostic requiert une adresse HTTP ou HTTPS.".into());
+    }
+    let hls = parsed.path().to_ascii_lowercase().ends_with(".m3u8");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent("Fluxo/0.3")
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = client.get(parsed);
+    if !hls {
+        request = request.header(reqwest::header::RANGE, "bytes=0-0");
+    }
+    let response = match request.send() {
+        Ok(response) => response,
+        Err(error) if error.is_timeout() => {
+            return Ok(Some(
+                "Le serveur de cette chaîne ne répond pas (délai dépassé).".into(),
+            ));
+        }
+        Err(error) if error.is_connect() => {
+            return Ok(Some(
+                "Connexion impossible au serveur de cette chaîne.".into(),
+            ));
+        }
+        Err(_) => return Ok(Some("Le serveur de cette chaîne est inaccessible.".into())),
+    };
+
+    let status = response.status();
+    if !status.is_success() {
+        let message = match status.as_u16() {
+            401 => "Le serveur demande une authentification (HTTP 401).",
+            403 if response
+                .headers()
+                .get("x-deny-reason")
+                .is_some_and(|value| value == "deny_backend") =>
+            {
+                "Le serveur bloque l’accès à cette chaîne (HTTP 403 : protection du flux)."
+            }
+            403 => "Le serveur refuse l’accès à cette chaîne (HTTP 403).",
+            404 => "Cette adresse de flux est introuvable sur le serveur (HTTP 404).",
+            410 => "Ce flux a été retiré du serveur (HTTP 410).",
+            429 => "Le serveur limite les demandes de lecture (HTTP 429).",
+            500..=599 => {
+                return Ok(Some(format!(
+                    "Le serveur de cette chaîne est indisponible (HTTP {}).",
+                    status.as_u16()
+                )));
+            }
+            _ => {
+                return Ok(Some(format!(
+                    "Le serveur refuse le flux (HTTP {}).",
+                    status.as_u16()
+                )));
+            }
+        };
+        return Ok(Some(message.into()));
+    }
+
+    if hls {
+        let mut prefix = Vec::new();
+        response
+            .take(4096)
+            .read_to_end(&mut prefix)
+            .map_err(|error| error.to_string())?;
+        let text = String::from_utf8_lossy(&prefix);
+        if !text.trim_start_matches('\u{feff}').starts_with("#EXTM3U") || !is_hls_manifest(&text) {
+            return Ok(Some(
+                "Le serveur répond, mais ne renvoie pas une playlist vidéo HLS valide.".into(),
+            ));
+        }
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+async fn diagnose_stream(source: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || diagnose_stream_url(&source))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 async fn open_youtube_player(
     app: AppHandle,
@@ -904,6 +988,7 @@ pub fn run() {
             add_playlist,
             add_playlist_if_catalog,
             fetch_hls_manifest,
+            diagnose_stream,
             open_youtube_player,
             set_youtube_player_bounds,
             hide_youtube_player,
@@ -923,7 +1008,12 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog_channels, youtube_video_id_from_html, youtube_video_id_from_url};
+    use super::{
+        catalog_channels, diagnose_stream_url, youtube_video_id_from_html,
+        youtube_video_id_from_url,
+    };
+    use std::io::{BufRead, Write};
+    use std::net::TcpListener;
 
     #[test]
     fn m3u8_url_distinguishes_channel_catalog_from_hls_video() {
@@ -957,5 +1047,34 @@ mod tests {
             youtube_video_id_from_url("https://youtube.com.evil.example/watch?v=NiRIbKwAejk")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn stream_diagnostic_distinguishes_server_block_from_valid_hls() {
+        for (response, expected) in [
+            (
+                "HTTP/1.1 403 Forbidden\r\nX-Deny-Reason: deny_backend\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                Some("Le serveur bloque l’accès à cette chaîne (HTTP 403 : protection du flux)."),
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 32\r\nConnection: close\r\n\r\n#EXTM3U\n#EXT-X-TARGETDURATION:6\n",
+                None,
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+                    line.clear();
+                }
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            let diagnosis = diagnose_stream_url(&format!("http://{address}/index.m3u8")).unwrap();
+            assert_eq!(diagnosis.as_deref(), expected);
+            server.join().unwrap();
+        }
     }
 }
