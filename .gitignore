@@ -1,8 +1,12 @@
 node_modules/
 dist/
 target/
+debug/
 .DS_Store
 *.log
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
 
 /Fluxo.app/
 src-tauri/gen/
