@@ -83,7 +83,7 @@ function render() {
         const text = make('span', 'channel-text'); text.append(make('strong', '', channel.name), make('small', '', channel.group));
         play.append(logo, text); play.onclick = () => playChannel(channel);
         const favorite = make('button', 'star', state.library.favorites.includes(channel.id) ? '★' : '☆'); favorite.title = 'Favori'; favorite.setAttribute('aria-label', 'Favori'); favorite.onclick = () => toggleFavorite(channel.id);
-        row.append(play, favorite); fragment.append(row);
+        row.append(play); if (state.view !== 'recent') row.append(favorite); fragment.append(row);
       }
       cursor = Math.min(cursor + count, channels.length);
       list.append(fragment);
@@ -122,6 +122,7 @@ async function playSource(url, name, channelId = null, tvgId = null) {
 }
 async function renderPrograms(tvgId) {
   const box = $('programs'); box.replaceChildren();
+  if (!state.library.epgSource) { box.append(make('p', 'muted', 'Ajoutez un guide XMLTV pour afficher les programmes.')); return; }
   if (!tvgId) { box.append(make('p', 'muted', 'Aucun identifiant de guide pour cette chaîne.')); return; }
   try {
     const programs = await invoke('get_programs', { channelId: tvgId });
@@ -162,7 +163,7 @@ function showSettings() {
     body.append(button('Enregistrer le guide TV', 'primary full', async (event) => { const target = event.currentTarget; target.disabled = true; try { const count = await invoke('set_epg_source', { source: epg.input.value }); await refreshLibrary(); toast(`${count} programmes chargés.`); if (state.playing?.tvgId) renderPrograms(state.playing.tvgId); } catch (error) { toast(errorMessage(error), 'error'); } finally { target.disabled = false; } }));
     const heading = make('h3', 'settings-heading', 'Playlists'); body.append(heading);
     for (const playlist of state.library.playlists) {
-      const row = make('div', 'settings-row'); const info = make('div'); info.append(make('strong', '', playlist.name), make('small', '', `${playlist.channels.length} chaînes`));
+      const row = make('div', 'settings-row'); const info = make('div'); info.append(make('strong', '', playlist.name), make('small', '', `${playlist.channels.length} chaîne${playlist.channels.length > 1 ? 's' : ''}`));
       row.append(info, button('↻', 'icon-button', async () => { try { const updated = await invoke('refresh_playlist', { id: playlist.id }); await refreshLibrary(); toast(`${updated.channels.length} chaînes actualisées.`); } catch (error) { toast(errorMessage(error), 'error'); } }), button('×', 'icon-button danger', async () => { if (!window.confirm(`Supprimer « ${playlist.name} » ?`)) return; await invoke('remove_playlist', { id: playlist.id }); if (state.view === playlist.id) state.view = 'all'; await refreshLibrary(); showSettings(); })); body.append(row);
     }
   });
