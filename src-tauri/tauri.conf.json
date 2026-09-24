@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Fluxo",
+  "version": "0.1.0",
+  "identifier": "app.fluxo.iptv",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "title": "Fluxo", "width": 1200, "height": 760, "minWidth": 820, "minHeight": 560, "backgroundColor": "#111315" }],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http: https:; img-src 'self' asset: http: https: data:; media-src 'self' asset: http: https: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "assetProtocol": { "enable": true, "scope": [] }
+    }
+  },
+  "bundle": { "active": true, "targets": ["app"], "macOS": { "minimumSystemVersion": "13.0" } }
+}
