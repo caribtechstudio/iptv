@@ -1,5 +1,7 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { parseSubtitles } from './subtitles.js';
 import './style.css';
 
 const app = document.querySelector('#app');
@@ -17,10 +19,10 @@ app.innerHTML = `
       <div class="sidebar-bottom"><button id="settingsButton">⚙ <span>Sources & guide TV</span></button></div>
     </aside>
     <main class="main">
-      <header class="topbar"><div><div class="eyebrow">VOTRE LECTEUR</div><h1 id="viewTitle">Toutes les chaînes</h1></div><div class="top-actions"><button id="openMedia" class="subtle">Ouvrir un média</button><button id="playUrl" class="primary">＋ Lire une URL</button></div></header>
+      <header class="topbar"><div><div class="eyebrow">VOTRE LECTEUR</div><h1 id="viewTitle">Toutes les chaînes</h1></div><div class="top-actions"><button id="playerMode" class="subtle" title="Agrandir le lecteur">Mode lecteur</button><button id="openMedia" class="subtle">Ouvrir un média</button><button id="playUrl" class="primary">＋ Lire une URL</button></div></header>
       <div class="content">
         <section class="catalogue"><div class="search-wrap"><span>⌕</span><input id="search" type="search" placeholder="Rechercher une chaîne ou un groupe…" aria-label="Rechercher"></div><div class="filters"><div id="groupFilters" class="group-filters"></div><span id="channelCount"></span></div><div id="channels" class="channels"></div></section>
-        <section class="player-pane"><div class="player-card"><div class="video-wrap"><video id="video" controls playsinline preload="metadata"></video><div id="videoEmpty" class="video-empty"><div class="empty-glyph">▶</div><strong>Prêt à regarder</strong><span>Choisissez une chaîne ou ouvrez un média.</span></div></div><div class="player-meta"><div class="live-indicator" id="liveIndicator">LECTEUR</div><div class="player-title-row"><h2 id="playingTitle">Aucune lecture</h2><button id="favoriteButton" title="Ajouter aux favoris" aria-label="Ajouter aux favoris" hidden>☆</button></div><p id="playingDetail">La vidéo et l’audio se lisent ici.</p><p id="playerError" role="alert"></p></div></div><div class="guide-card"><div class="guide-header"><h3>Programme TV</h3><span id="guideStatus">Ajoutez un guide XMLTV</span></div><div id="programs" class="programs"><p class="muted">Sélectionnez une chaîne pour voir son programme.</p></div></div></section>
+        <section class="player-pane"><div class="player-card"><div class="video-wrap" id="videoWrap"><video id="video" playsinline preload="metadata"></video><div id="subtitleOverlay" class="subtitle-overlay" aria-live="off"></div><div id="videoEmpty" class="video-empty"><div class="empty-glyph">▶</div><strong>Prêt à regarder</strong><span>Choisissez une chaîne ou ouvrez un média.</span></div><div class="player-controls" id="playerControls"><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Position de lecture"><div class="controls-row"><button id="togglePlay" title="Lecture / pause" aria-label="Lecture / pause">▶</button><button id="back10" title="Reculer de 10 secondes" aria-label="Reculer de 10 secondes">−10</button><button id="forward10" title="Avancer de 10 secondes" aria-label="Avancer de 10 secondes">+10</button><span id="timeLabel">00:00 / 00:00</span><div class="controls-spacer"></div><button id="mute" title="Couper le son" aria-label="Couper le son">◖))</button><input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume"><button id="playerOptions" title="Options du lecteur">⚙</button><button id="pip" title="Image dans l’image" aria-label="Image dans l’image">▣</button><button id="fullscreen" title="Plein écran" aria-label="Plein écran">⛶</button></div></div></div><div class="player-meta"><div class="live-indicator" id="liveIndicator">LECTEUR</div><div class="player-title-row"><h2 id="playingTitle">Aucune lecture</h2><button id="favoriteButton" title="Ajouter aux favoris" aria-label="Ajouter aux favoris" hidden>☆</button></div><p id="playingDetail">La vidéo et l’audio se lisent ici.</p><p id="playerError" role="alert"></p></div></div><div class="guide-card"><div class="guide-header"><h3>Programme TV</h3><span id="guideStatus">Ajoutez un guide XMLTV</span></div><div id="programs" class="programs"><p class="muted">Sélectionnez une chaîne pour voir son programme.</p></div></div></section>
       </div>
     </main>
   </div>
@@ -28,9 +30,21 @@ app.innerHTML = `
   <div id="toast" role="status" aria-live="polite"></div>`;
 
 const $ = (id) => document.getElementById(id);
-const state = { library: { playlists: [], favorites: [], recent: [], epgSource: null }, view: 'all', group: 'Tous', query: '', playing: null };
+const state = { library: { playlists: [], favorites: [], recent: [], epgSource: null, xtreamAccounts: [] }, view: 'all', group: 'Tous', query: '', playing: null, subtitleCues: [], subtitleTrack: 'off' };
 const video = $('video');
 let toastTimer;
+const subtitleSettings = (() => {
+  try { return { size: 100, position: 8, ...JSON.parse(localStorage.getItem('fluxo-subtitles') || '{}') }; }
+  catch { return { size: 100, position: 8 }; }
+})();
+function applySubtitleSettings() {
+  const size = Math.max(60, Math.min(200, Number(subtitleSettings.size) || 100));
+  const position = Math.max(2, Math.min(40, Number(subtitleSettings.position) || 8));
+  $('subtitleOverlay').style.fontSize = `${size}%`;
+  $('subtitleOverlay').style.bottom = `${position}%`;
+  localStorage.setItem('fluxo-subtitles', JSON.stringify({ size, position }));
+}
+applySubtitleSettings();
 
 function toast(message, kind = '') {
   const el = $('toast'); el.textContent = message; el.className = kind; el.classList.add('show');
@@ -40,7 +54,7 @@ function errorMessage(error) { return typeof error === 'string' ? error : error?
 async function refreshLibrary() { state.library = await invoke('get_library'); render(); }
 function allChannels() { return state.library.playlists.flatMap((playlist) => playlist.channels); }
 function currentChannels() {
-  if (state.view === 'recent') return state.library.recent.map((item) => ({ id: `recent|${item.url}`, name: item.name, group: 'Récents', streamUrl: item.url }));
+  if (state.view === 'recent') return state.library.recent.map((item) => allChannels().find((channel) => channel.streamUrl === item.url) || ({ id: `recent|${item.url}`, name: item.name, group: 'Récents', streamUrl: item.url, kind: item.url.includes('/episode/') ? 'episode' : 'live', containerExtension: item.containerExtension }));
   let channels = allChannels();
   if (state.view === 'favorites') channels = channels.filter((item) => state.library.favorites.includes(item.id));
   else if (state.view !== 'all') channels = state.library.playlists.find((item) => item.id === state.view)?.channels || [];
@@ -63,7 +77,7 @@ function render() {
   if (!groups.includes(state.group)) state.group = 'Tous';
   const filters = $('groupFilters'); filters.replaceChildren();
   for (const group of groups) { const button = make('button', state.group === group ? 'selected' : '', group); button.onclick = () => { state.group = group; $('channels').scrollTop = 0; render(); }; filters.append(button); }
-  const channels = filteredChannels(); $('channelCount').textContent = `${channels.length} chaîne${channels.length > 1 ? 's' : ''}`;
+  const channels = filteredChannels(); $('channelCount').textContent = `${channels.length} élément${channels.length > 1 ? 's' : ''}`;
   const list = $('channels'); const previousScroll = list.scrollTop; list.replaceChildren(); list.onscroll = null;
   if (!channels.length) {
     const empty = make('div', 'list-empty');
@@ -101,24 +115,41 @@ function setView(view) { state.view = view; state.group = 'Tous'; state.query = 
 async function toggleFavorite(id) { try { await invoke('toggle_favorite', { id }); await refreshLibrary(); } catch (error) { toast(errorMessage(error), 'error'); } }
 async function playChannel(channel) {
   try {
+    if (channel.kind === 'series') { await showEpisodes(channel); return; }
     let url = channel.streamUrl;
+    if (url.startsWith('xtream://')) url = await invoke('resolve_stream', { reference: url, extension: channel.containerExtension || null });
     if (url.startsWith('file:')) {
       const path = decodeURIComponent(new URL(url).pathname);
       url = convertFileSrc(await invoke('allow_media_file', { path }));
     }
-    await playSource(url, channel.name, channel.id, channel.tvgId);
+    await playSource(url, channel.name, channel.id.startsWith('recent|') ? null : channel.id, channel.tvgId, channel.streamUrl, channel.kind, channel.containerExtension);
   } catch (error) { toast(errorMessage(error), 'error'); }
 }
-async function playSource(url, name, channelId = null, tvgId = null) {
+async function playSource(url, name, channelId = null, tvgId = null, recentUrl = url, kind = 'movie', extension = null) {
   video.pause(); video.removeAttribute('src'); video.load();
   $('videoEmpty').hidden = true; $('playerError').textContent = '';
-  state.playing = { url, name, channelId, tvgId }; $('playingTitle').textContent = name;
-  $('playingDetail').textContent = url.startsWith('asset:') || url.includes('asset.localhost') ? 'Fichier local' : url;
-  $('liveIndicator').textContent = /\.m3u8?(?:[?#]|$)/i.test(url) ? 'DIRECT / HLS' : 'LECTEUR';
+  state.subtitleCues = []; state.subtitleTrack = 'off'; $('subtitleOverlay').textContent = '';
+  state.playing = { url: recentUrl, name, channelId, tvgId }; $('playingTitle').textContent = name;
+  $('playingDetail').textContent = recentUrl.startsWith('file:') ? 'Fichier local' : recentUrl.startsWith('xtream:') ? 'Catalogue Xtream' : recentUrl;
+  $('liveIndicator').textContent = kind === 'live' && /\.m3u8?(?:[?#]|$)/i.test(url) ? 'DIRECT / HLS' : kind === 'live' ? 'DIRECT' : 'LECTEUR';
   video.src = url; video.load();
-  try { await video.play(); } catch (error) { if (error?.name !== 'NotAllowedError') $('playerError').textContent = 'Lecture impossible. Vérifiez le format ou l’adresse du flux.'; }
-  try { await invoke('record_recent', { name, url }); await refreshLibrary(); } catch (error) { toast(errorMessage(error), 'error'); }
+  try { await video.play(); } catch (error) { if (!['NotAllowedError', 'AbortError'].includes(error?.name)) $('playerError').textContent = 'Lecture impossible. Vérifiez le format ou l’adresse du flux.'; }
+  try { await invoke('record_recent', { name, url: recentUrl, extension }); await refreshLibrary(); } catch (error) { toast(errorMessage(error), 'error'); }
   renderPrograms(tvgId);
+}
+async function showEpisodes(channel) {
+  modal(channel.name, (body) => body.append(make('p', 'muted', 'Chargement des épisodes…')));
+  try {
+    const episodes = await invoke('get_series_episodes', { reference: channel.streamUrl });
+    const body = $('modalBody'); body.replaceChildren();
+    if (!episodes.length) { body.append(make('p', 'muted', 'Aucun épisode disponible.')); return; }
+    for (const episode of episodes) {
+      body.append(button(`Saison ${episode.season} · ${episode.name}`, 'episode-button', async () => {
+        closeModal();
+        await playChannel({ id: episode.streamUrl, name: episode.name, group: channel.group, streamUrl: episode.streamUrl, kind: 'episode', containerExtension: episode.extension });
+      }));
+    }
+  } catch (error) { $('modalBody').replaceChildren(make('p', 'muted', errorMessage(error))); }
 }
 async function renderPrograms(tvgId) {
   const box = $('programs'); box.replaceChildren();
@@ -148,6 +179,25 @@ function showAddPlaylist() {
     body.append(button('Importer la playlist', 'primary full', async (event) => { const target = event.currentTarget; target.disabled = true; target.textContent = 'Importation…'; try { const playlist = await invoke('add_playlist', { name: name.input.value, source: source.input.value }); closeModal(); await refreshLibrary(); setView(playlist.id); toast(`${playlist.channels.length} chaînes importées.`); } catch (error) { toast(errorMessage(error), 'error'); } finally { target.disabled = false; target.textContent = 'Importer la playlist'; } }));
   });
 }
+function showAddXtream() {
+  modal('Connecter Xtream Codes', (body) => {
+    body.append(make('p', 'modal-intro', 'Renseignez les identifiants fournis par votre service. Le mot de passe est conservé dans le trousseau macOS.'));
+    const name = field('Nom du compte', 'Ex. Mon service');
+    const server = field('Serveur', 'https://exemple.com:8080');
+    const username = field('Utilisateur', 'Identifiant');
+    const password = field('Mot de passe', 'Mot de passe'); password.input.type = 'password';
+    body.append(name.label, server.label, username.label, password.label);
+    body.append(button('Connecter le compte', 'primary full', async (event) => {
+      const target = event.currentTarget; target.disabled = true; target.textContent = 'Connexion…';
+      try {
+        const playlist = await invoke('add_xtream_account', { name: name.input.value, server: server.input.value, username: username.input.value, password: password.input.value });
+        password.input.value = ''; closeModal(); await refreshLibrary(); setView(playlist.id);
+        toast(`${playlist.channels.length} médias importés.`);
+      } catch (error) { toast(errorMessage(error), 'error'); }
+      finally { target.disabled = false; target.textContent = 'Connecter le compte'; }
+    }));
+  });
+}
 function showPlayUrl() {
   modal('Lire une URL', (body) => {
     body.append(make('p', 'modal-intro', 'Ouvrez un flux HLS, une vidéo ou un fichier audio en ligne.'));
@@ -157,26 +207,145 @@ function showPlayUrl() {
 }
 function showSettings() {
   modal('Sources & guide TV', (body) => {
-    body.append(make('p', 'modal-intro', 'Gérez vos playlists et ajoutez un guide des programmes XMLTV.'));
+    body.append(make('p', 'modal-intro', 'Gérez vos playlists, comptes Xtream et le guide des programmes.'));
+    body.append(button('＋ Ajouter une playlist M3U', 'subtle full', showAddPlaylist));
+    body.append(button('＋ Connecter Xtream Codes', 'subtle full', showAddXtream));
     const epg = field('Guide TV XMLTV', 'Adresse HTTPS ou fichier XML', state.library.epgSource || ''); body.append(epg.label);
     body.append(button('Choisir un fichier XMLTV', 'subtle full', async () => { const path = await open({ multiple: false, filters: [{ name: 'Guide XMLTV', extensions: ['xml'] }] }); if (path) epg.input.value = path; }));
     body.append(button('Enregistrer le guide TV', 'primary full', async (event) => { const target = event.currentTarget; target.disabled = true; try { const count = await invoke('set_epg_source', { source: epg.input.value }); await refreshLibrary(); toast(`${count} programmes chargés.`); if (state.playing?.tvgId) renderPrograms(state.playing.tvgId); } catch (error) { toast(errorMessage(error), 'error'); } finally { target.disabled = false; } }));
     const heading = make('h3', 'settings-heading', 'Playlists'); body.append(heading);
     for (const playlist of state.library.playlists) {
       const row = make('div', 'settings-row'); const info = make('div'); info.append(make('strong', '', playlist.name), make('small', '', `${playlist.channels.length} chaîne${playlist.channels.length > 1 ? 's' : ''}`));
-      row.append(info, button('↻', 'icon-button', async () => { try { const updated = await invoke('refresh_playlist', { id: playlist.id }); await refreshLibrary(); toast(`${updated.channels.length} chaînes actualisées.`); } catch (error) { toast(errorMessage(error), 'error'); } }), button('×', 'icon-button danger', async () => { if (!window.confirm(`Supprimer « ${playlist.name} » ?`)) return; await invoke('remove_playlist', { id: playlist.id }); if (state.view === playlist.id) state.view = 'all'; await refreshLibrary(); showSettings(); })); body.append(row);
+      row.append(info, button('↻', 'icon-button', async () => { try { const updated = await invoke('refresh_playlist', { id: playlist.id }); await refreshLibrary(); toast(`${updated.channels.length} médias actualisés.`); } catch (error) { toast(errorMessage(error), 'error'); } }), button('×', 'icon-button danger', async () => { if (!window.confirm(`Supprimer « ${playlist.name} » ?`)) return; await invoke('remove_playlist', { id: playlist.id }); if (state.view === playlist.id) state.view = 'all'; await refreshLibrary(); showSettings(); })); body.append(row);
     }
   });
 }
 async function openMedia() {
-  try { const path = await open({ multiple: false, filters: [{ name: 'Audio et vidéo', extensions: ['mp4', 'm4v', 'mov', 'mp3', 'm4a', 'aac', 'wav', 'aiff', 'webm', 'mkv'] }] }); if (!path) return; const allowed = await invoke('allow_media_file', { path }); await playSource(convertFileSrc(allowed), path.split('/').pop()); }
+  try { const path = await open({ multiple: false, filters: [{ name: 'Audio et vidéo', extensions: ['mp4', 'm4v', 'mov', 'mp3', 'm4a', 'aac', 'wav', 'aiff', 'webm', 'mkv', 'flac', 'ogg', 'ts', 'avi'] }] }); if (!path) return; const allowed = await invoke('allow_media_file', { path }); await playSource(convertFileSrc(allowed), path.split('/').pop(), null, null, new URL(`file://${allowed}`).toString()); }
   catch (error) { toast(errorMessage(error), 'error'); }
 }
+function timeText(value) {
+  if (!Number.isFinite(value)) return '00:00';
+  const hours = Math.floor(value / 3600); const minutes = Math.floor(value / 60) % 60; const seconds = Math.floor(value) % 60;
+  return `${hours ? `${String(hours).padStart(2, '0')}:` : ''}${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+function updateControls() {
+  const duration = video.duration;
+  const seekable = Number.isFinite(duration) && duration > 0;
+  $('seek').disabled = !seekable;
+  $('back10').disabled = !seekable; $('forward10').disabled = !seekable;
+  $('seek').value = seekable ? Math.round(video.currentTime / duration * 1000) : 0;
+  $('timeLabel').textContent = seekable ? `${timeText(video.currentTime)} / ${timeText(duration)}` : video.src ? 'DIRECT' : '00:00 / 00:00';
+  $('togglePlay').textContent = video.paused ? '▶' : 'Ⅱ';
+  $('mute').textContent = video.muted || video.volume === 0 ? '◖×' : '◖))';
+  $('volume').value = video.muted ? 0 : video.volume;
+}
+function renderSubtitles() {
+  const overlay = $('subtitleOverlay');
+  if (state.subtitleTrack === 'external') {
+    overlay.textContent = state.subtitleCues.filter((cue) => cue.start <= video.currentTime && cue.end >= video.currentTime).map((cue) => cue.text).join('\n');
+    return;
+  }
+  if (state.subtitleTrack.startsWith('native:')) {
+    const track = video.textTracks[Number(state.subtitleTrack.split(':')[1])];
+    overlay.textContent = track?.activeCues ? Array.from(track.activeCues).map((cue) => cue.text).join('\n') : '';
+    return;
+  }
+  overlay.textContent = '';
+}
+function selectSubtitleTrack(value) {
+  state.subtitleTrack = value;
+  Array.from(video.textTracks).forEach((track, index) => { track.mode = value === `native:${index}` ? 'hidden' : 'disabled'; });
+  renderSubtitles();
+}
+async function loadSubtitleFile() {
+  const path = await open({ multiple: false, filters: [{ name: 'Sous-titres', extensions: ['srt', 'vtt'] }] });
+  if (!path) return;
+  try {
+    const text = await invoke('read_subtitle', { path });
+    const cues = parseSubtitles(text);
+    if (!cues.length) throw new Error('Aucun sous-titre valide dans ce fichier.');
+    state.subtitleCues = cues; selectSubtitleTrack('external'); toast(`${cues.length} sous-titres chargés.`);
+    showPlayerOptions();
+  } catch (error) { toast(errorMessage(error), 'error'); }
+}
+function selectField(labelText, options, selected, onChange) {
+  const label = make('label', 'field'); label.append(make('span', '', labelText));
+  const select = document.createElement('select');
+  for (const [value, text] of options) { const option = document.createElement('option'); option.value = value; option.textContent = text; select.append(option); }
+  select.value = selected; select.onchange = () => onChange(select.value); label.append(select); return label;
+}
+function rangeField(labelText, min, max, value, suffix, onChange) {
+  const label = make('label', 'field'); const caption = make('span', '', `${labelText} · ${value}${suffix}`);
+  const input = document.createElement('input'); input.type = 'range'; input.min = min; input.max = max; input.value = value;
+  input.oninput = () => { caption.textContent = `${labelText} · ${input.value}${suffix}`; onChange(Number(input.value)); };
+  label.append(caption, input); return label;
+}
+function showPlayerOptions() {
+  modal('Options du lecteur', (body) => {
+    body.append(selectField('Vitesse', [['0.5', '0,5×'], ['0.75', '0,75×'], ['1', 'Normale'], ['1.25', '1,25×'], ['1.5', '1,5×'], ['2', '2×']], String(video.playbackRate), (value) => { video.playbackRate = Number(value); }));
+    const tracks = [['off', 'Désactivés']];
+    if (state.subtitleCues.length) tracks.push(['external', 'Fichier externe']);
+    Array.from(video.textTracks).forEach((track, index) => tracks.push([`native:${index}`, track.label || track.language || `Piste ${index + 1}`]));
+    body.append(selectField('Sous-titres', tracks, state.subtitleTrack, selectSubtitleTrack));
+    body.append(button('Importer un fichier SRT ou VTT', 'subtle full', loadSubtitleFile));
+    body.append(rangeField('Taille des sous-titres', 60, 200, subtitleSettings.size, '%', (value) => { subtitleSettings.size = value; applySubtitleSettings(); }));
+    body.append(rangeField('Hauteur depuis le bas', 2, 40, subtitleSettings.position, '%', (value) => { subtitleSettings.position = value; applySubtitleSettings(); }));
+    const audioTracks = video.audioTracks;
+    if (audioTracks?.length > 1) {
+      body.append(selectField('Piste audio', Array.from(audioTracks).map((track, index) => [String(index), track.label || track.language || `Piste ${index + 1}`]), String(Array.from(audioTracks).findIndex((track) => track.enabled)), (selected) => {
+        Array.from(audioTracks).forEach((track, index) => { track.enabled = index === Number(selected); });
+      }));
+    }
+    body.append(make('p', 'muted', 'Les pistes proposées dépendent du média et du moteur multimédia macOS.'));
+  });
+}
+async function toggleFullscreen() {
+  try {
+    const window = getCurrentWindow();
+    const next = !(await window.isFullscreen());
+    await window.setFullscreen(next);
+    document.body.classList.toggle('native-fullscreen', next);
+  } catch (error) { toast(`Plein écran indisponible : ${errorMessage(error)}`, 'error'); }
+}
+function togglePlayerMode() {
+  const enabled = document.body.classList.toggle('player-mode');
+  $('playerMode').textContent = enabled ? 'Afficher le catalogue' : 'Mode lecteur';
+}
+getCurrentWindow().onResized(async () => {
+  document.body.classList.toggle('native-fullscreen', await getCurrentWindow().isFullscreen());
+}).catch(() => {});
 $('addPlaylistShortcut').onclick = showAddPlaylist; $('settingsButton').onclick = showSettings; $('playUrl').onclick = showPlayUrl; $('openMedia').onclick = openMedia;
+$('playerMode').onclick = togglePlayerMode;
+$('togglePlay').onclick = () => { if (video.paused) video.play(); else video.pause(); };
+$('back10').onclick = () => { video.currentTime = Math.max(0, video.currentTime - 10); };
+$('forward10').onclick = () => { video.currentTime = Math.min(video.duration, video.currentTime + 10); };
+$('seek').oninput = (event) => { if (Number.isFinite(video.duration)) video.currentTime = Number(event.target.value) / 1000 * video.duration; };
+$('mute').onclick = () => { video.muted = !video.muted; updateControls(); };
+$('volume').oninput = (event) => { video.volume = Number(event.target.value); video.muted = video.volume === 0; updateControls(); };
+$('playerOptions').onclick = showPlayerOptions;
+$('fullscreen').onclick = toggleFullscreen;
+$('pip').onclick = async () => {
+  try {
+    if (!document.pictureInPictureEnabled || !video.requestPictureInPicture) throw new Error('Image dans l’image non disponible sur ce Mac.');
+    if (document.pictureInPictureElement) await document.exitPictureInPicture(); else await video.requestPictureInPicture();
+  } catch (error) { toast(errorMessage(error), 'error'); }
+};
+$('videoWrap').ondblclick = (event) => { if (event.target === video) toggleFullscreen(); };
 $('favoriteButton').onclick = () => state.playing?.channelId && toggleFavorite(state.playing.channelId);
 $('modalClose').onclick = closeModal; $('modal').onclick = (event) => { if (event.target === $('modal')) closeModal(); };
 $('search').oninput = (event) => { state.query = event.target.value; $('channels').scrollTop = 0; render(); };
 document.querySelectorAll('.main-nav button').forEach((button) => button.onclick = () => setView(button.dataset.view));
-document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeModal(); if (event.key === ' ' && event.target === document.body && video.src) { event.preventDefault(); if (video.paused) video.play(); else video.pause(); } });
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeModal();
+  if (event.target !== document.body || !video.src) return;
+  if (event.key === ' ') { event.preventDefault(); if (video.paused) video.play(); else video.pause(); }
+  if (event.key.toLowerCase() === 'f') toggleFullscreen();
+  if (event.key === 'ArrowLeft' && Number.isFinite(video.duration)) video.currentTime = Math.max(0, video.currentTime - 10);
+  if (event.key === 'ArrowRight' && Number.isFinite(video.duration)) video.currentTime = Math.min(video.duration, video.currentTime + 10);
+});
+for (const name of ['timeupdate', 'loadedmetadata', 'durationchange', 'play', 'pause', 'volumechange']) video.addEventListener(name, () => { updateControls(); renderSubtitles(); });
+video.addEventListener('playing', () => { $('playerError').textContent = ''; updateControls(); });
+video.textTracks?.addEventListener?.('addtrack', (event) => { event.track.mode = 'disabled'; event.track.addEventListener('cuechange', renderSubtitles); });
 video.addEventListener('error', () => { if (video.src) $('playerError').textContent = 'Ce flux ou ce format ne peut pas être lu par le moteur multimédia de macOS.'; });
 refreshLibrary().catch((error) => toast(errorMessage(error), 'error'));

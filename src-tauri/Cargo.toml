@@ -1,6 +1,6 @@
 [package]
 name = "fluxo"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lecteur IPTV et multimédia pour macOS"
 authors = ["Fluxo"]
 edition = "2024"
@@ -24,3 +24,4 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 url = "2"
 chrono = "0.4"
 flate2 = "1"
+keyring = "4.2"

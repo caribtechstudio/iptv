@@ -1,6 +1,9 @@
+mod xtream;
+
 use flate2::read::GzDecoder;
 use iptv_core::{
-    Library, Playlist, Program, RecentItem, is_hls_manifest, now_iso, parse_m3u, parse_xmltv,
+    Library, Playlist, Program, RecentItem, XtreamAccount, is_hls_manifest, now_iso, parse_m3u,
+    parse_xmltv,
 };
 use std::{
     fs,
@@ -188,7 +191,20 @@ async fn refresh_playlist(app: AppHandle, id: String) -> Result<Playlist, String
             .ok_or("Playlist introuvable.")?
             .source
             .clone();
-        let channels = import_channels(&source)?;
+        let channels = if source.starts_with("xtream://") {
+            let account = store
+                .library
+                .lock()
+                .map_err(|e| e.to_string())?
+                .xtream_accounts
+                .iter()
+                .find(|item| format!("xtream://{}", item.id) == source)
+                .cloned()
+                .ok_or("Compte Xtream introuvable.")?;
+            xtream::import(&account, &xtream::password(&account.id)?)?
+        } else {
+            import_channels(&source)?
+        };
         store.change(|library| {
             let playlist = library
                 .playlists
@@ -206,10 +222,133 @@ async fn refresh_playlist(app: AppHandle, id: String) -> Result<Playlist, String
 
 #[tauri::command]
 fn remove_playlist(app: AppHandle, id: String) -> Result<(), String> {
+    let account = app
+        .state::<Store>()
+        .library
+        .lock()
+        .map_err(|e| e.to_string())?
+        .xtream_accounts
+        .iter()
+        .find(|item| item.id == id)
+        .cloned();
     app.state::<Store>().change(|library| {
         library.playlists.retain(|item| item.id != id);
+        library.xtream_accounts.retain(|item| item.id != id);
+        library
+            .favorites
+            .retain(|favorite| !favorite.starts_with(&format!("xtream://{id}/")));
+        library
+            .recent
+            .retain(|recent| !recent.url.starts_with(&format!("xtream://{id}/")));
         Ok(())
+    })?;
+    if account.is_some() {
+        let _ = xtream::keychain_entry(&id)?.delete_credential();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn add_xtream_account(
+    app: AppHandle,
+    name: String,
+    server: String,
+    username: String,
+    password: String,
+) -> Result<Playlist, String> {
+    let name = name.trim().to_owned();
+    let username = username.trim().to_owned();
+    if name.is_empty() || username.is_empty() || password.is_empty() {
+        return Err("Indiquez un nom, un utilisateur et un mot de passe.".into());
+    }
+    let server = xtream::normalize_server(&server)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos()
+            .to_string();
+        let account = XtreamAccount {
+            id: id.clone(),
+            server,
+            username,
+        };
+        let channels = xtream::import(&account, &password)?;
+        let entry = xtream::keychain_entry(&id)?;
+        entry
+            .set_password(&password)
+            .map_err(|_| "Impossible d’enregistrer le mot de passe dans le trousseau macOS.")?;
+        let playlist = Playlist {
+            id,
+            name,
+            source: format!("xtream://{}", account.id),
+            channels,
+            updated_at: now_iso(),
+        };
+        let result = app.state::<Store>().change(|library| {
+            library.xtream_accounts.push(account);
+            library.playlists.push(playlist.clone());
+            Ok(playlist)
+        });
+        if result.is_err() {
+            let _ = entry.delete_credential();
+        }
+        result
     })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn resolve_stream(
+    app: AppHandle,
+    reference: String,
+    extension: Option<String>,
+) -> Result<String, String> {
+    let account_id = xtream::account_id(&reference)?;
+    let account = app
+        .state::<Store>()
+        .library
+        .lock()
+        .map_err(|e| e.to_string())?
+        .xtream_accounts
+        .iter()
+        .find(|item| item.id == account_id)
+        .cloned()
+        .ok_or("Compte Xtream introuvable.")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        xtream::resolve(
+            &account,
+            &xtream::password(&account_id)?,
+            &reference,
+            extension.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_series_episodes(
+    app: AppHandle,
+    reference: String,
+) -> Result<Vec<xtream::Episode>, String> {
+    let account_id = xtream::account_id(&reference)?;
+    let account = app
+        .state::<Store>()
+        .library
+        .lock()
+        .map_err(|e| e.to_string())?
+        .xtream_accounts
+        .iter()
+        .find(|item| item.id == account_id)
+        .cloned()
+        .ok_or("Compte Xtream introuvable.")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        xtream::episodes(&account, &xtream::password(&account_id)?, &reference)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -226,7 +365,12 @@ fn toggle_favorite(app: AppHandle, id: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn record_recent(app: AppHandle, name: String, url: String) -> Result<(), String> {
+fn record_recent(
+    app: AppHandle,
+    name: String,
+    url: String,
+    extension: Option<String>,
+) -> Result<(), String> {
     app.state::<Store>().change(|library| {
         library.recent.retain(|item| item.url != url);
         library.recent.insert(
@@ -235,6 +379,7 @@ fn record_recent(app: AppHandle, name: String, url: String) -> Result<(), String
                 name,
                 url,
                 played_at: now_iso(),
+                container_extension: extension,
             },
         );
         library.recent.truncate(30);
@@ -296,6 +441,23 @@ fn allow_media_file(app: AppHandle, path: String) -> Result<String, String> {
     Ok(canonical.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn read_subtitle(path: String) -> Result<String, String> {
+    let path = Path::new(&path);
+    let valid = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "srt" | "vtt"));
+    if !valid || !path.is_file() {
+        return Err("Choisissez un fichier de sous-titres SRT ou VTT.".into());
+    }
+    if fs::metadata(path).map_err(|e| e.to_string())?.len() > 2 * 1024 * 1024 {
+        return Err("Fichier de sous-titres trop volumineux.".into());
+    }
+    fs::read_to_string(path)
+        .map_err(|_| "Sous-titres illisibles : choisissez un fichier UTF-8.".into())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -325,6 +487,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_library,
+            add_xtream_account,
+            resolve_stream,
+            get_series_episodes,
             add_playlist,
             refresh_playlist,
             remove_playlist,
@@ -332,7 +497,8 @@ pub fn run() {
             record_recent,
             set_epg_source,
             get_programs,
-            allow_media_file
+            allow_media_file,
+            read_subtitle
         ])
         .run(tauri::generate_context!())
         .expect("Impossible de lancer Fluxo");

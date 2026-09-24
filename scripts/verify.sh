@@ -3,8 +3,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 cargo fmt --all --check
-cargo test -p iptv-core
+cargo test --workspace
 cargo clippy -p iptv-core -p fluxo --all-targets -- -D warnings
+node --test tests/*.test.js
 npm run check
 
 if [[ "${1:-}" == "--bundle" ]]; then

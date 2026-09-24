@@ -14,6 +14,28 @@ pub struct Channel {
     pub stream_url: String,
     pub logo: Option<String>,
     pub tvg_id: Option<String>,
+    #[serde(default)]
+    pub kind: ChannelKind,
+    #[serde(default)]
+    pub container_extension: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelKind {
+    #[default]
+    Live,
+    Movie,
+    Series,
+    Episode,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XtreamAccount {
+    pub id: String,
+    pub server: String,
+    pub username: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,6 +54,8 @@ pub struct RecentItem {
     pub name: String,
     pub url: String,
     pub played_at: String,
+    #[serde(default)]
+    pub container_extension: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -45,6 +69,8 @@ pub struct Library {
     pub recent: Vec<RecentItem>,
     #[serde(default)]
     pub epg_source: Option<String>,
+    #[serde(default)]
+    pub xtream_accounts: Vec<XtreamAccount>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,6 +134,8 @@ pub fn parse_m3u(input: &str, base: Option<&str>) -> Result<Vec<Channel>, String
                 stream_url,
                 logo,
                 tvg_id,
+                kind: ChannelKind::Live,
+                container_extension: None,
             });
         }
     }
