@@ -66,9 +66,12 @@ const openSourceExternally = button('Ouvrir dans le navigateur', 'subtle externa
 openSourceExternally.hidden = true; $('playerError').after(openSourceExternally);
 let toastTimer;
 const preferences = (() => {
-  const defaults = { autoCheck: true, pinnedGroups: [], recentGroups: [], groupSort: 'list', engine: 'auto', autoUpdate: true };
-  try { return { ...defaults, ...JSON.parse(localStorage.getItem('fluxo-preferences') || '{}') }; }
-  catch { return defaults; }
+  // mpv first by default; `engineChosen` keeps an engine picked in the settings.
+  const defaults = { autoCheck: true, pinnedGroups: [], recentGroups: [], groupSort: 'list', engine: 'mpv', engineChosen: false, autoUpdate: true };
+  try {
+    const saved = JSON.parse(localStorage.getItem('fluxo-preferences') || '{}');
+    return { ...defaults, ...saved, engine: saved.engineChosen ? saved.engine : defaults.engine };
+  } catch { return defaults; }
 })();
 function savePreferences() { try { localStorage.setItem('fluxo-preferences', JSON.stringify(preferences)); } catch { /* private storage */ } }
 const subtitleSettings = (() => {
@@ -124,7 +127,7 @@ const playerDeps = {
   invoke,
   ffmpeg: () => Boolean(state.engine.ffmpeg),
   mpv: () => Boolean(state.engine.mpv?.available),
-  preference: () => (ENGINE_PREFERENCES.includes(preferences.engine) ? preferences.engine : 'auto'),
+  preference: () => (ENGINE_PREFERENCES.includes(preferences.engine) ? preferences.engine : 'mpv'),
   remembered: (url) => engineMemory.get(url),
   platform: () => state.engine.platform || 'macos',
   nativeSrc: async (url) => {
@@ -1094,12 +1097,12 @@ async function showSettings() {
 
     body.append(make('h3', 'settings-heading', 'Moteur de lecture'));
     const engineChoices = [
-      ['auto', 'Automatique (recommandé)'],
+      ['mpv', 'mpv en priorité (par défaut, formats les plus variés)'],
+      ['auto', 'Automatique (lecteur système pour les flux compatibles)'],
       ['system', 'Lecteur système en priorité (AirPlay, image dans l’image)'],
-      ['mpv', 'mpv en priorité (formats les plus variés)'],
     ];
-    body.append(selectField('Moteur préféré', engineChoices, preferences.engine, (value) => { preferences.engine = value; savePreferences(); }));
-    body.append(make('p', 'muted', 'Automatique : le lecteur système pour les flux compatibles (AirPlay reste disponible), mpv pour les autres (HEVC en direct, MPEG-2, MKV, DASH, sons AC3/DTS…). Fluxo retient le moteur qui a fonctionné pour chaque chaîne, et l’autre moteur sert toujours de secours.'));
+    body.append(selectField('Moteur préféré', engineChoices, preferences.engine, (value) => { preferences.engine = value; preferences.engineChosen = true; savePreferences(); }));
+    body.append(make('p', 'muted', 'mpv lit presque tous les formats (HEVC en direct, MPEG-2, MKV, DASH, sons AC3/DTS…) avec le décodage matériel du Mac. AirPlay et l’image dans l’image rebasculent la chaîne sur le lecteur système. Automatique garde le lecteur système pour les flux compatibles et retient le moteur qui a fonctionné pour chaque chaîne. Dans tous les cas, l’autre moteur sert de secours.'));
     const mpvRow = make('div', `status-row${engine.mpv?.available ? '' : ' bad'}`);
     mpvRow.append(make('strong', '', 'Moteur mpv'), make('small', '', engine.mpv?.available ? `Actif : ${engine.mpv.library}` : `Indisponible${engine.mpv?.error ? ` : ${engine.mpv.error}` : ''}. Installez-le avec brew install mpv, puis relancez Fluxo.`));
     body.append(mpvRow);

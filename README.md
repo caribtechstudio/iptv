@@ -60,8 +60,9 @@ Les comptes Xtream nécessitent un accès légitime au service. Pour les fournis
 
 Le réglage **Sources & guide TV → Moteur de lecture** propose :
 
-- **Automatique** (par défaut) : le lecteur de macOS pour les flux qu’il lit, pour garder AirPlay et l’image dans l’image ; mpv pour le reste (HEVC en direct, MPEG-2, MKV, AVI, DASH, sons AC3/EAC3/DTS…). Fluxo retient le moteur qui a fonctionné pour chaque chaîne et l’utilise directement la fois suivante.
-- **Lecteur système en priorité** ou **mpv en priorité**. Dans tous les cas, l’autre moteur sert de secours avant d’afficher une erreur.
+- **mpv en priorité** (par défaut) : mpv lit presque tous les formats (HEVC en direct, MPEG-2, MKV, AVI, DASH, sons AC3/EAC3/DTS…) avec le décodage matériel du Mac.
+- **Automatique** : le lecteur de macOS pour les flux qu’il lit, pour garder AirPlay et l’image dans l’image ; mpv pour le reste. Fluxo retient le moteur qui a fonctionné pour chaque chaîne et l’utilise directement la fois suivante.
+- **Lecteur système en priorité**. Dans tous les cas, l’autre moteur sert de secours avant d’afficher une erreur.
 
 Toucher AirPlay ou l’image dans l’image pendant une lecture mpv rebascule la chaîne sur le lecteur de macOS. La vidéo de mpv est dessinée par Fluxo (rendu OpenGL de libmpv, décodage matériel VideoToolbox) sous l’interface, dont les commandes restent identiques ; la multivue utilise une instance mpv par vignette.
 
