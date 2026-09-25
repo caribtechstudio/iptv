@@ -590,6 +590,24 @@ async fn import_local_media(app: AppHandle, paths: Vec<String>) -> Result<LocalI
     .await
 }
 
+/// Only the small state file is rewritten: the catalogue keeps its `updated_at`.
+#[tauri::command]
+fn rename_playlist(app: AppHandle, id: String, name: String) -> Result<(), String> {
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return Err("Indique un nom.".into());
+    }
+    app.state::<Store>().change(|library| {
+        library
+            .playlists
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or("Playlist introuvable.")?
+            .name = name;
+        Ok(())
+    })
+}
+
 #[tauri::command]
 fn remove_playlist(app: AppHandle, id: String) -> Result<(), String> {
     let store = app.state::<Store>();
@@ -1401,6 +1419,7 @@ pub fn run() {
             hide_youtube_player,
             import_local_media,
             refresh_playlist,
+            rename_playlist,
             remove_playlist,
             toggle_favorite,
             reorder_favorites,

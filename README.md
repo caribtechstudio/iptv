@@ -27,6 +27,8 @@ Ouvrez ensuite `Fluxo.app` dans ce dossier. Cette application est destinée à �
 - Le **Guide TV** combine votre guide XMLTV personnel, ceux des playlists (seulement les pays présents, en priorité ceux de vos favoris) et le `xmltv.php` des comptes Xtream ; il est actualisé toutes les 6 heures. Les chaînes sont associées par `tvg-id`, par identifiant sans suffixe (`M6.fr@HD` → `M6.fr`) ou par nom. La vue **Guide TV** affiche une grille de 6 heures, et la liste des chaînes montre le programme en cours.
 - Les chaînes Xtream avec archive proposent le **replay** : depuis la grille ou la section Replay du programme TV.
 - **Reprendre** liste les films, épisodes et vidéos commencés ; leur lecture reprend à la dernière position.
+- **Catégories** : le bouton **Catégories** ouvre une liste avec recherche (plusieurs mots, dans n’importe quel ordre : « belg sport »), navigation au clavier (↑ ↓, Entrée, Échap) et tri par ordre de la playlist, alphabétique ou par taille. 📌 épingle une catégorie dans les raccourcis sous la barre, à côté des dernières utilisées. Recliquer sur la catégorie active (ou ×) réaffiche tout.
+- **Renommer une playlist** : ✎ à côté de son titre, double-clic dans la barre latérale, ou ✎ dans **Sources & guide TV**.
 - **Filtres** : pays, langue, chaînes hors ligne et groupes masqués. **Vérifier** teste la disponibilité des chaînes affichées ; les chaînes visibles sont aussi vérifiées automatiquement (désactivable). Les favoris se réordonnent avec ↑/↓.
 - **Multivue** : jusqu’à 4 chaînes à la fois ; cliquez des chaînes dans la liste pour les ajouter et sur une vignette pour entendre son son.
 - ⏺ enregistre le flux en cours dans `~/Movies/Fluxo` ; **Enregistrements** liste les fichiers, lisibles dans Fluxo.
@@ -47,7 +49,7 @@ Le lecteur utilise le moteur multimédia de macOS, avec une escalade automatique
 1. lecture directe ;
 2. relais local (127.0.0.1, adresse protégée par un jeton) qui ajoute les en-têtes du fournisseur et réécrit les playlists HLS ;
 3. reconditionnement MPEG-TS → HLS pour les flux TS bruts (sorties `.ts` Xtream, `/udp/`, fichiers `.ts` locaux et enregistrements) ;
-4. conversion FFmpeg pour ce que macOS ne décode pas (MPEG-2, HEVC en TS, DASH, MKV, AVI…), si FFmpeg est installé (`brew install ffmpeg`).
+4. conversion FFmpeg pour ce que macOS ne décode pas (MPEG-2, HEVC en TS, DASH, MKV, AVI…), si FFmpeg est installé (`brew install ffmpeg`). L’image est ramenée à 1080 lignes au plus pour tenir le temps réel ; si l’encodeur matériel refuse la source, l’encodeur logiciel prend le relais.
 
 Avant de conclure à un échec, Fluxo sonde le flux (playlist principale → variante → segment) avec les mêmes en-têtes que le lecteur et lit les codecs réellement transmis. Si la source est morte ou protégée, les autres sources de la même chaîne (même `tvg-id` ou même nom) sont essayées. Un flux figé est reconnecté automatiquement. Une chaîne sans piste audio est signalée comme telle.
 

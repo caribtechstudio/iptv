@@ -7,7 +7,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { parseSubtitles } from './subtitles.js';
 import { isWebUrl, isYouTubePage } from './media-sources.js';
 import { isHlsMediaUrl, parseHlsQualities } from './hls-quality.js';
-import { alternativesFor, countryLabel, dedupeByUrl, facet, filterChannels, flag } from './catalog.js';
+import { alternativesFor, countryLabel, dedupeByUrl, facet, filterChannels, flag, normalizeQuery } from './catalog.js';
 import { MODE_LABELS, Player } from './playback.js';
 import { gridWindow, renderGuideGrid } from './guide-grid.js';
 import { createMultiview } from './multiview.js';
@@ -30,9 +30,9 @@ app.innerHTML = `
       <div class="sidebar-bottom"><button id="recordingsButton">⏺ <span>Enregistrements</span></button><button id="settingsButton">⚙ <span>Sources & guide TV</span></button></div>
     </aside>
     <main class="main">
-      <header class="topbar"><div><div class="eyebrow">VOTRE LECTEUR</div><h1 id="viewTitle">Toutes les chaînes</h1></div><div class="top-actions"><button id="multiviewMode" class="subtle" title="Regarder jusqu’à 4 chaînes à la fois">Multivue</button><button id="playerMode" class="subtle" title="Agrandir le lecteur">Mode lecteur</button><button id="openMedia" class="subtle">Ouvrir des médias</button><button id="playUrl" class="primary">＋ Lire une URL</button></div></header>
+      <header class="topbar"><div><div class="eyebrow">VOTRE LECTEUR</div><div class="title-row"><h1 id="viewTitle">Toutes les chaînes</h1><button id="renameView" class="title-edit" title="Renommer la playlist" aria-label="Renommer la playlist" hidden>✎</button></div></div><div class="top-actions"><button id="multiviewMode" class="subtle" title="Regarder jusqu’à 4 chaînes à la fois">Multivue</button><button id="playerMode" class="subtle" title="Agrandir le lecteur">Mode lecteur</button><button id="openMedia" class="subtle">Ouvrir des médias</button><button id="playUrl" class="primary">＋ Lire une URL</button></div></header>
       <div class="content">
-        <section class="catalogue"><div class="search-wrap"><span>⌕</span><input id="search" type="search" placeholder="Rechercher une chaîne ou un groupe…" aria-label="Rechercher"></div><div class="filters"><div id="groupFilters" class="group-filters"></div><button id="filtersButton" class="filter-button" title="Pays, langue, groupes masqués, chaînes hors ligne">Filtres</button><button id="checkButton" class="filter-button" title="Vérifier la disponibilité des chaînes affichées">Vérifier</button><span id="channelCount"></span></div><div id="channels" class="channels"></div><div id="guideGrid" class="guide-grid" hidden></div></section>
+        <section class="catalogue"><div class="search-wrap"><span>⌕</span><input id="search" type="search" placeholder="Rechercher une chaîne ou un groupe…" aria-label="Rechercher"></div><div class="filters-wrap"><div class="filters"><button id="groupPicker" class="group-picker" aria-haspopup="listbox" aria-expanded="false" aria-controls="groupPanel"><span id="groupPickerLabel" class="group-picker-label">Catégories</span><span id="groupPickerCount" class="group-picker-count"></span><span class="group-picker-chevron" aria-hidden="true">▾</span></button><button id="groupClear" class="group-clear" title="Afficher toutes les catégories" aria-label="Afficher toutes les catégories" hidden>×</button><button id="filtersButton" class="filter-button" title="Pays, langue, groupes masqués, chaînes hors ligne">Filtres</button><button id="checkButton" class="filter-button" title="Vérifier la disponibilité des chaînes affichées">Vérifier</button><span id="channelCount"></span></div><div id="groupPanel" class="group-panel" hidden><div class="group-panel-head"><input id="groupSearch" type="search" placeholder="Rechercher une catégorie…" aria-label="Rechercher une catégorie" autocomplete="off"><div class="group-sort" role="group" aria-label="Ordre des catégories"><button data-sort="list" title="Ordre de la playlist">Liste</button><button data-sort="az" title="Ordre alphabétique">A–Z</button><button data-sort="count" title="Les plus grandes d’abord">Taille</button></div></div><div id="groupList" class="group-list-panel" role="listbox" aria-label="Catégories"></div><p class="group-panel-hint">↑ ↓ pour naviguer · Entrée pour choisir · 📌 pour épingler en raccourci</p></div></div><div id="groupFilters" class="group-filters" hidden></div><div id="channels" class="channels"></div><div id="guideGrid" class="guide-grid" hidden></div></section>
         <section class="player-pane"><div class="player-card"><div class="video-wrap" id="videoWrap"><video id="video" playsinline preload="metadata" x-webkit-airplay="allow"></video><div id="subtitleOverlay" class="subtitle-overlay" aria-live="off"></div><div id="zapOverlay" class="zap-overlay" hidden></div><div id="videoEmpty" class="video-empty"><div class="empty-glyph">▶</div><strong>Prêt à regarder</strong><span>Choisissez une chaîne ou glissez des vidéos ici.</span></div><div class="player-controls" id="playerControls"><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Position de lecture"><div class="controls-row"><button id="togglePlay" title="Lecture / pause" aria-label="Lecture / pause">▶</button><button id="back10" title="Reculer de 10 secondes" aria-label="Reculer de 10 secondes">−10</button><button id="forward10" title="Avancer de 10 secondes" aria-label="Avancer de 10 secondes">+10</button><span id="timeLabel">00:00 / 00:00</span><div class="controls-spacer"></div><button id="mute" title="Couper le son (M)" aria-label="Couper le son">◖))</button><input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume"><button id="subtitleOptions" title="Gérer les sous-titres" aria-label="Gérer les sous-titres" aria-haspopup="dialog">CC</button><button id="qualityOptions" title="Qualité vidéo" aria-label="Qualité vidéo" aria-haspopup="dialog" hidden>Auto</button><button id="recordButton" title="Enregistrer ce direct" aria-label="Enregistrer">⏺</button><button id="airplay" title="AirPlay" aria-label="AirPlay" hidden>⎚</button><button id="playerOptions" title="Options du lecteur" aria-label="Options du lecteur">⚙</button><button id="pip" title="Image dans l’image" aria-label="Image dans l’image">▣</button><button id="fullscreen" title="Plein écran (F)" aria-label="Plein écran">⛶</button></div></div></div><div class="player-meta"><div class="meta-top"><div class="live-indicator" id="liveIndicator">LECTEUR</div><span id="engineBadge" class="engine-badge" hidden></span></div><div class="player-title-row"><h2 id="playingTitle">Aucune lecture</h2><button id="streamInfo" class="meta-button" title="Informations sur le flux (I)" aria-label="Informations sur le flux" hidden>ⓘ</button><button id="favoriteButton" class="meta-button" title="Ajouter aux favoris" aria-label="Ajouter aux favoris" hidden>☆</button></div><p id="playingDetail">La vidéo et l’audio se lisent ici.</p><p id="playerStatus" class="player-status" aria-live="polite"></p><p id="playerError" role="alert"></p></div></div><div id="queueCard" class="queue-card" hidden><div class="queue-head"><div><h3>À suivre</h3><span id="queueCount"></span></div><div class="queue-actions"><button id="queuePrevious" aria-label="Média précédent" title="Média précédent">←</button><button id="queueNext" aria-label="Média suivant" title="Média suivant">→</button><button id="queueClear" title="Effacer la file">Effacer</button></div></div><div id="queueItems" class="queue-items"></div></div><div class="guide-card"><div class="guide-header"><h3>Programme TV</h3><span id="guideStatus">Ajoutez un guide XMLTV</span></div><div id="programs" class="programs"><p class="muted">Sélectionnez une chaîne pour voir son programme.</p></div></div></section>
         <section id="multiview" class="multiview" hidden></section>
       </div>
@@ -64,8 +64,9 @@ const openSourceExternally = button('Ouvrir dans le navigateur', 'subtle externa
 openSourceExternally.hidden = true; $('playerError').after(openSourceExternally);
 let toastTimer;
 const preferences = (() => {
-  try { return { autoCheck: true, ...JSON.parse(localStorage.getItem('fluxo-preferences') || '{}') }; }
-  catch { return { autoCheck: true }; }
+  const defaults = { autoCheck: true, pinnedGroups: [], recentGroups: [], groupSort: 'list' };
+  try { return { ...defaults, ...JSON.parse(localStorage.getItem('fluxo-preferences') || '{}') }; }
+  catch { return defaults; }
 })();
 function savePreferences() { try { localStorage.setItem('fluxo-preferences', JSON.stringify(preferences)); } catch { /* private storage */ } }
 const subtitleSettings = (() => {
@@ -326,6 +327,7 @@ function filterOptions(overrides = {}) {
   return { group: state.group, query: state.query, country: state.country, language: state.language, hiddenGroups: state.library.hiddenGroups, hideOffline: state.hideOffline, health: state.health, keepHidden: viewKeepsHidden(), ...overrides };
 }
 function filteredChannels() { return filterChannels(currentChannels(), filterOptions()); }
+function currentPlaylist() { return state.library.playlists.find((item) => item.id === state.view) || null; }
 function viewTitle() {
   const titles = { all: 'Toutes les chaînes', guide: 'Guide TV', favorites: 'Favoris', recent: 'Récents', continue: 'Reprendre' };
   return titles[state.view] || state.library.playlists.find((item) => item.id === state.view)?.name || 'Playlist';
@@ -338,18 +340,12 @@ function render() {
   const playlistNav = $('playlistNav'); playlistNav.replaceChildren();
   for (const playlist of state.library.playlists) {
     const el = make('button', state.view === playlist.id ? 'active' : '', playlist.name);
-    el.title = playlist.name; el.onclick = () => setView(playlist.id); playlistNav.append(el);
+    el.title = `${playlist.name}\nDouble-cliquez pour renommer`; el.onclick = () => setView(playlist.id); el.ondblclick = () => renamePlaylist(playlist);
+    playlistNav.append(el);
   }
   $('viewTitle').textContent = viewTitle();
-  const base = filterChannels(currentChannels(), filterOptions({ group: 'Tous', query: '' }));
-  const groups = ['Tous', ...new Set(base.map((item) => item.group))];
-  if (!groups.includes(state.group)) state.group = 'Tous';
-  const filters = $('groupFilters'); filters.replaceChildren();
-  for (const group of groups.slice(0, 400)) {
-    const el = make('button', state.group === group ? 'selected' : '', group);
-    el.onclick = () => { state.group = group; $('channels').scrollTop = 0; render(); };
-    filters.append(el);
-  }
+  $('renameView').hidden = !currentPlaylist();
+  renderGroups(filterChannels(currentChannels(), filterOptions({ group: 'Tous', query: '' })));
   const count = activeFilterCount();
   $('filtersButton').textContent = count ? `Filtres · ${count}` : 'Filtres';
   $('filtersButton').classList.toggle('selected', count > 0);
@@ -441,8 +437,140 @@ function markPlayingRows() {
 }
 
 function setView(view) {
+  closeGroupPanel();
   state.view = view; state.group = 'Tous'; state.query = ''; $('search').value = ''; $('channels').scrollTop = 0; render();
 }
+
+// ---------- Catégories ----------
+// A searchable picker replaces the endless row of chips; pinned and recent categories stay
+// one click away. Clicking the active category again returns to « Toutes ».
+
+const groupPanel = { open: false, active: -1, items: [], counts: new Map(), total: 0 };
+function selectGroup(group) {
+  const next = group === state.group ? 'Tous' : group;
+  state.group = next;
+  if (next !== 'Tous') {
+    preferences.recentGroups = [next, ...preferences.recentGroups.filter((item) => item !== next)].slice(0, 6);
+    savePreferences();
+  }
+  closeGroupPanel();
+  $('channels').scrollTop = 0; render();
+}
+function togglePinnedGroup(group) {
+  const pinned = preferences.pinnedGroups;
+  preferences.pinnedGroups = pinned.includes(group) ? pinned.filter((item) => item !== group) : [...pinned, group];
+  savePreferences();
+  render();
+}
+function renderGroups(base) {
+  const counts = new Map();
+  for (const channel of base) counts.set(channel.group, (counts.get(channel.group) || 0) + 1);
+  Object.assign(groupPanel, { counts, total: base.length });
+  if (state.group !== 'Tous' && !counts.has(state.group)) state.group = 'Tous';
+  const all = state.group === 'Tous';
+  const useful = counts.size > 1;
+  $('groupPicker').hidden = !useful;
+  $('groupPicker').classList.toggle('selected', !all);
+  $('groupPickerLabel').textContent = all ? 'Catégories' : state.group;
+  $('groupPickerCount').textContent = all ? `${counts.size}` : `${counts.get(state.group)}`;
+  $('groupPicker').title = all ? `${counts.size} catégories · cliquez pour choisir` : `${state.group} · cliquez pour changer`;
+  $('groupClear').hidden = all;
+  const pinned = preferences.pinnedGroups.filter((group) => counts.has(group));
+  const recent = preferences.recentGroups.filter((group) => counts.has(group) && !pinned.includes(group));
+  const quick = [...pinned, ...recent.slice(0, Math.max(0, 8 - pinned.length))];
+  if (!all && !quick.includes(state.group)) quick.unshift(state.group);
+  const chips = $('groupFilters'); chips.replaceChildren();
+  chips.hidden = !useful || !quick.length;
+  for (const group of quick) {
+    const active = state.group === group;
+    const chip = make('button', `${active ? 'selected' : ''}${pinned.includes(group) ? ' pinned' : ''}`, group);
+    chip.title = active ? `${group} · cliquez à nouveau pour tout afficher` : `${group} · ${counts.get(group)} élément${counts.get(group) > 1 ? 's' : ''}`;
+    chip.setAttribute('aria-pressed', String(active));
+    chip.onclick = () => selectGroup(group);
+    chips.append(chip);
+  }
+  if (groupPanel.open) drawGroupPanel();
+}
+function groupOption(group, count, label = group) {
+  const option = make('div', `group-option${state.group === group ? ' selected' : ''}`);
+  option.setAttribute('role', 'option');
+  option.setAttribute('aria-selected', String(state.group === group));
+  const main = make('button', 'group-option-main');
+  main.tabIndex = -1;
+  main.append(make('span', 'group-option-name', label), make('span', 'group-option-count', count.toLocaleString('fr-FR')));
+  main.onclick = () => selectGroup(group);
+  option.append(main);
+  if (group !== 'Tous') {
+    const isPinned = preferences.pinnedGroups.includes(group);
+    const pin = button('📌', `group-pin${isPinned ? ' on' : ''}`, (event) => { event.stopPropagation(); togglePinnedGroup(group); $('groupSearch').focus(); });
+    pin.tabIndex = -1;
+    pin.title = isPinned ? 'Retirer des raccourcis' : 'Épingler dans les raccourcis';
+    pin.setAttribute('aria-label', pin.title);
+    option.append(pin);
+  }
+  groupPanel.items.push({ group, el: option });
+  return option;
+}
+function drawGroupPanel() {
+  const list = $('groupList'); list.replaceChildren(); groupPanel.items = [];
+  document.querySelectorAll('.group-sort button').forEach((el) => el.classList.toggle('selected', el.dataset.sort === preferences.groupSort));
+  const needle = normalizeQuery($('groupSearch').value);
+  let groups = [...groupPanel.counts];
+  if (preferences.groupSort === 'az') groups.sort((a, b) => a[0].localeCompare(b[0], 'fr', { numeric: true, sensitivity: 'base' }));
+  else if (preferences.groupSort === 'count') groups.sort((a, b) => b[1] - a[1]);
+  // Every word must appear, in any order: « belg sport » finds « Belgique | Sport ».
+  const words = needle.split(/\s+/).filter(Boolean);
+  if (words.length) groups = groups.filter(([group]) => { const name = normalizeQuery(group); return words.every((word) => name.includes(word)); });
+  if (!needle) list.append(groupOption('Tous', groupPanel.total, 'Toutes les catégories'));
+  const pinned = needle ? [] : groups.filter(([group]) => preferences.pinnedGroups.includes(group));
+  if (pinned.length) {
+    list.append(make('div', 'group-section', 'Épinglées'));
+    for (const [group, count] of pinned) list.append(groupOption(group, count));
+    list.append(make('div', 'group-section', `Toutes · ${groups.length}`));
+  }
+  for (const [group, count] of groups) list.append(groupOption(group, count));
+  if (!groups.length) list.append(make('p', 'group-empty', 'Aucune catégorie ne correspond.'));
+  const selected = groupPanel.items.findIndex((item) => item.group === state.group);
+  setGroupActive(needle ? 0 : Math.max(0, selected), !needle);
+}
+function setGroupActive(index, center = false) {
+  const { items } = groupPanel;
+  if (!items.length) { groupPanel.active = -1; return; }
+  groupPanel.active = Math.max(0, Math.min(items.length - 1, index));
+  items.forEach((item, i) => item.el.classList.toggle('active', i === groupPanel.active));
+  items[groupPanel.active].el.scrollIntoView({ block: center ? 'center' : 'nearest' });
+}
+function openGroupPanel() {
+  if (groupPanel.open) { closeGroupPanel(true); return; }
+  groupPanel.open = true;
+  $('groupPanel').hidden = false;
+  $('groupPicker').setAttribute('aria-expanded', 'true');
+  $('groupSearch').value = '';
+  drawGroupPanel();
+  $('groupSearch').focus();
+}
+function closeGroupPanel(focusPicker = false) {
+  if (!groupPanel.open) return;
+  groupPanel.open = false;
+  $('groupPanel').hidden = true;
+  $('groupPicker').setAttribute('aria-expanded', 'false');
+  if (focusPicker) $('groupPicker').focus();
+}
+$('groupPicker').onclick = openGroupPanel;
+$('groupClear').onclick = () => selectGroup(state.group);
+$('groupSearch').oninput = drawGroupPanel;
+$('groupSearch').onkeydown = (event) => {
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setGroupActive(groupPanel.active + (event.key === 'ArrowDown' ? 1 : -1)); }
+  else if (event.key === 'PageDown' || event.key === 'PageUp') { event.preventDefault(); setGroupActive(groupPanel.active + (event.key === 'PageDown' ? 10 : -10)); }
+  else if (event.key === 'Enter') { event.preventDefault(); const item = groupPanel.items[groupPanel.active]; if (item) selectGroup(item.group); }
+  else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeGroupPanel(true); }
+};
+document.querySelectorAll('.group-sort button').forEach((el) => {
+  el.onclick = () => { preferences.groupSort = el.dataset.sort; savePreferences(); drawGroupPanel(); $('groupSearch').focus(); };
+});
+document.addEventListener('pointerdown', (event) => {
+  if (groupPanel.open && !$('groupPanel').contains(event.target) && !$('groupPicker').contains(event.target)) closeGroupPanel();
+});
 
 // ---------- Maintenant / à suivre ----------
 
@@ -880,6 +1008,24 @@ function showPlayUrl() {
   });
 }
 
+function renamePlaylist(playlist, after) {
+  modal('Renommer la playlist', (body) => {
+    const name = field('Nom', playlist.name, playlist.name); body.append(name.label);
+    const save = async () => {
+      const value = name.input.value.trim();
+      if (!value) { toast('Indiquez un nom.', 'error'); return; }
+      if (value === playlist.name) { closeModal(); after?.(); return; }
+      try {
+        await invoke('rename_playlist', { id: playlist.id, name: value });
+        playlist.name = value; closeModal(); render(); toast('Playlist renommée.'); after?.();
+      } catch (error) { toast(errorMessage(error), 'error'); }
+    };
+    name.input.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); save(); } };
+    body.append(button('Renommer', 'primary full', save));
+  });
+  $('modalBody').querySelector('input')?.select();
+}
+
 async function showSettings() {
   const [engine, epg] = await Promise.all([invoke('engine_info').catch(() => state.engine), invoke('epg_status').catch(() => state.epg)]);
   state.engine = engine;
@@ -922,7 +1068,9 @@ async function showSettings() {
     for (const playlist of state.library.playlists) {
       const row = make('div', 'settings-row'); const info = make('div');
       info.append(make('strong', '', playlist.name), make('small', '', `${playlist.channels.length} média${playlist.channels.length > 1 ? 's' : ''}${playlist.epgUrl ? ' · guide TV inclus' : ''}`));
-      row.append(info, button('↻', 'icon-button', async () => { try { const updated = await invoke('refresh_playlist', { id: playlist.id }); await refreshLibrary(); toast(`${updated.channels.length} médias actualisés.`); } catch (error) { toast(errorMessage(error), 'error'); } }), button('×', 'icon-button danger', async () => { if (!window.confirm(`Supprimer « ${playlist.name} » ?`)) return; await invoke('remove_playlist', { id: playlist.id }); if (playlist.id === 'local-media') { clearQueue(); if (state.playing?.url.startsWith('file:')) state.playing.channelId = null; } if (state.view === playlist.id) state.view = 'all'; await refreshLibrary(); showSettings(); }));
+      const rename = button('✎', 'icon-button', () => renamePlaylist(playlist, showSettings));
+      rename.title = 'Renommer'; rename.setAttribute('aria-label', `Renommer ${playlist.name}`);
+      row.append(info, rename, button('↻', 'icon-button', async () => { try { const updated = await invoke('refresh_playlist', { id: playlist.id }); await refreshLibrary(); toast(`${updated.channels.length} médias actualisés.`); } catch (error) { toast(errorMessage(error), 'error'); } }), button('×', 'icon-button danger', async () => { if (!window.confirm(`Supprimer « ${playlist.name} » ?`)) return; await invoke('remove_playlist', { id: playlist.id }); if (playlist.id === 'local-media') { clearQueue(); if (state.playing?.url.startsWith('file:')) state.playing.channelId = null; } if (state.view === playlist.id) state.view = 'all'; await refreshLibrary(); showSettings(); }));
       body.append(row);
     }
 
@@ -1237,6 +1385,7 @@ window.addEventListener('resize', scheduleYoutubeBounds);
 $('addPlaylistShortcut').onclick = showAddPlaylist; $('settingsButton').onclick = showSettings; $('recordingsButton').onclick = showRecordings;
 $('playUrl').onclick = showPlayUrl; $('openMedia').onclick = openMedia;
 $('playerMode').onclick = togglePlayerMode; $('multiviewMode').onclick = toggleMultiview;
+$('renameView').onclick = () => { const playlist = currentPlaylist(); if (playlist) renamePlaylist(playlist); };
 $('filtersButton').onclick = showFilters; $('checkButton').onclick = () => checkVisibleChannels().catch((error) => toast(errorMessage(error), 'error'));
 $('queuePrevious').onclick = () => playQueueIndex(state.queueIndex - 1);
 $('queueNext').onclick = () => playQueueIndex(state.queueIndex + 1);
@@ -1269,7 +1418,7 @@ $('search').oninput = (event) => {
 };
 document.querySelectorAll('.main-nav button').forEach((el) => { el.onclick = () => setView(el.dataset.view); });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') { closeModal(); return; }
+  if (event.key === 'Escape') { closeGroupPanel(); closeModal(); return; }
   const target = event.target;
   if (!$('modal').hidden || event.metaKey || event.ctrlKey || event.altKey) return;
   if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;

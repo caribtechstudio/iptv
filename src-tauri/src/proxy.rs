@@ -321,11 +321,7 @@ impl Proxy {
         &self,
         options: crate::transcode::Options,
     ) -> Result<OpenedStream, String> {
-        let job = Job::start(options, self.next_dir())?;
-        if let Err(error) = job.wait_playlist(Duration::from_secs(30)) {
-            job.stop();
-            return Err(error);
-        }
+        let job = crate::transcode::launch(&options, || self.next_dir(), Duration::from_secs(30))?;
         let session = self.register(StreamHeaders::default(), Kind::Transcode(job));
         Ok(OpenedStream {
             url: format!("{}/f/index.m3u8", self.base(&session)),

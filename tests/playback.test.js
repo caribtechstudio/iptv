@@ -20,6 +20,8 @@ test('escalates according to the probe and stops on dead sources', () => {
   assert.equal(nextPlan({ probe: { engine: 'transcode' }, tried: new Set(['native', 'relay']), url: 'https://h/a', ffmpeg: false }), null);
   assert.equal(nextPlan({ probe: { engine: 'transcode' }, tried: new Set(['native', 'relay']), url: 'https://h/a', ffmpeg: true }).mode, 'transcode');
   assert.match(failureMessage({ engine: 'transcode', message: 'MPEG-2.' }, false), /brew install ffmpeg/);
+  assert.equal(failureMessage({ engine: 'transcode', message: 'HEVC.' }, true, 'La conversion FFmpeg a échoué.'), 'HEVC.');
+  assert.equal(failureMessage({ engine: 'transcode', message: 'HEVC.' }, true, 'La conversion FFmpeg a échoué.', new Set(['transcode'])), 'La conversion FFmpeg a échoué.');
   assert.equal(canCopyVideo({ video: ['h264'], unsupported: ['aac-latm'] }), true);
   assert.equal(canCopyVideo({ video: ['hevc'], unsupported: ['hevc'] }), false);
 });

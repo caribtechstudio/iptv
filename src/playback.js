@@ -52,10 +52,12 @@ export function nextPlan({ probe, ffmpeg = false, tried = new Set(), url = '', l
   return mode ? { mode, live } : null;
 }
 
-export function failureMessage(probe, ffmpeg, fallback) {
+export function failureMessage(probe, ffmpeg, fallback, tried = new Set()) {
   if (probe?.engine === 'transcode' && !ffmpeg) {
     return `${probe.message || 'Ce flux nécessite le moteur de compatibilité.'} Installez FFmpeg (brew install ffmpeg) pour le lire.`;
   }
+  // The conversion ran and failed: its own error says more than the probe's codec diagnosis.
+  if (probe?.engine === 'transcode' && tried.has('transcode') && fallback) return fallback;
   return probe?.message || fallback || 'La lecture de ce flux a échoué.';
 }
 
@@ -232,7 +234,7 @@ export class Player {
       this.#load(ctx, next);
       return;
     }
-    this.#sourceFailed(ctx, failureMessage(probe, this.deps.ffmpeg(), message || errors[0] || mediaMessage));
+    this.#sourceFailed(ctx, failureMessage(probe, this.deps.ffmpeg(), message || errors[0] || mediaMessage, ctx.tried));
   }
 
   #sourceFailed(ctx, message) {
