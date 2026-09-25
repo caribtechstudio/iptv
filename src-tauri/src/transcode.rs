@@ -12,7 +12,8 @@ use std::{
 
 static FFMPEG: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-/// FFmpeg bundled next to the app, installed by Homebrew/MacPorts, or on the `PATH`.
+/// FFmpeg bundled in the app (`scripts/bundle_native.py`), installed by Homebrew/MacPorts, or
+/// on the `PATH`.
 pub fn ffmpeg_path() -> Option<PathBuf> {
     FFMPEG
         .get_or_init(|| {
@@ -20,8 +21,9 @@ pub fn ffmpeg_path() -> Option<PathBuf> {
             if let Ok(exe) = std::env::current_exe()
                 && let Some(dir) = exe.parent()
             {
+                candidates.push(dir.join("../Resources/native/ffmpeg"));
+                candidates.push(dir.join("native/ffmpeg"));
                 candidates.push(dir.join("ffmpeg"));
-                candidates.push(dir.join("../Resources/ffmpeg"));
             }
             for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] {
                 candidates.push(Path::new(dir).join("ffmpeg"));

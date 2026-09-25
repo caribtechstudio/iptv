@@ -8,7 +8,8 @@ import { parseSubtitles } from './subtitles.js';
 import { isWebUrl, isYouTubePage } from './media-sources.js';
 import { isHlsMediaUrl, parseHlsQualities } from './hls-quality.js';
 import { alternativesFor, countryLabel, dedupeByUrl, facet, filterChannels, flag, normalizeQuery } from './catalog.js';
-import { MODE_LABELS, Player } from './playback.js';
+import { ENGINE_PREFERENCES, MODE_LABELS, Player, engineOf } from './playback.js';
+import { MpvMedia } from './mpv-media.js';
 import { gridWindow, renderGuideGrid } from './guide-grid.js';
 import { createMultiview } from './multiview.js';
 import './style.css';
@@ -40,6 +41,7 @@ app.innerHTML = `
   </div>
   <div id="dropOverlay" class="drop-overlay" hidden><div><strong>Déposez vos médias</strong><span>Vidéos, fichiers audio ou dossier de vidéos</span></div></div>
   <div id="modal" class="modal-backdrop" hidden><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-head"><h2 id="modalTitle"></h2><button id="modalClose" class="close" aria-label="Fermer">×</button></div><div id="modalBody"></div></div></div>
+  <div id="updateBanner" class="update-banner" role="status" aria-live="polite" hidden><div><strong id="updateTitle"></strong><span id="updateDetail"></span></div><button id="updateInstall" class="primary">Installer et redémarrer</button><button id="updateLater" class="subtle">Plus tard</button></div>
   <div id="toast" role="status" aria-live="polite"></div>`;
 
 const $ = (id) => document.getElementById(id);
@@ -47,7 +49,7 @@ const state = {
   library: { playlists: [], favorites: [], recent: [], epgSource: null, xtreamAccounts: [], hiddenGroups: [], progress: [], ignorePlaylistEpg: false },
   view: 'all', group: 'Tous', query: '', country: '', language: '', hideOffline: false,
   playing: null, previous: null, subtitleCues: [], subtitleTrack: 'off', queue: [], queueIndex: -1,
-  health: {}, engine: { ffmpeg: null, recordingsDir: '' }, recordings: new Map(), epg: { programs: 0, loading: false },
+  health: {}, engine: { ffmpeg: null, recordingsDir: '', mpv: { available: false }, platform: 'macos', version: '' }, recordings: new Map(), epg: { programs: 0, loading: false },
 };
 let catalog = { all: [], byUrl: new Map(), byId: new Map() };
 const video = $('video');
@@ -64,7 +66,7 @@ const openSourceExternally = button('Ouvrir dans le navigateur', 'subtle externa
 openSourceExternally.hidden = true; $('playerError').after(openSourceExternally);
 let toastTimer;
 const preferences = (() => {
-  const defaults = { autoCheck: true, pinnedGroups: [], recentGroups: [], groupSort: 'list' };
+  const defaults = { autoCheck: true, pinnedGroups: [], recentGroups: [], groupSort: 'list', engine: 'auto', autoUpdate: true };
   try { return { ...defaults, ...JSON.parse(localStorage.getItem('fluxo-preferences') || '{}') }; }
   catch { return defaults; }
 })();
@@ -100,9 +102,31 @@ function epgRef(channel) { return { key: channel.id, tvgId: channel.tvgId || nul
 
 // ---------- Lecteur ----------
 
+/** Engine that last played each address (`mpv` or `system`), used by the automatic choice. */
+const engineMemory = (() => {
+  const KEY = 'fluxo-engines';
+  const LIMIT = 500;
+  let entries;
+  try { entries = new Map(JSON.parse(localStorage.getItem(KEY) || '[]')); } catch { entries = new Map(); }
+  return {
+    get: (url) => entries.get(url) || null,
+    set(url, engine) {
+      if (!url || entries.get(url) === engine) return;
+      entries.delete(url); entries.set(url, engine);
+      while (entries.size > LIMIT) entries.delete(entries.keys().next().value);
+      try { localStorage.setItem(KEY, JSON.stringify([...entries])); } catch { /* private storage */ }
+    },
+    clear() { entries.clear(); try { localStorage.removeItem(KEY); } catch { /* private storage */ } },
+  };
+})();
+
 const playerDeps = {
   invoke,
   ffmpeg: () => Boolean(state.engine.ffmpeg),
+  mpv: () => Boolean(state.engine.mpv?.available),
+  preference: () => (ENGINE_PREFERENCES.includes(preferences.engine) ? preferences.engine : 'auto'),
+  remembered: (url) => engineMemory.get(url),
+  platform: () => state.engine.platform || 'macos',
   nativeSrc: async (url) => {
     if (!url.startsWith('file:')) return url;
     return convertFileSrc(await invoke('allow_media_file', { path: decodeURIComponent(new URL(url).pathname) }));
@@ -121,6 +145,10 @@ function reportHealth(url, ok, message = null) {
   invoke('report_health', { url, ok, message }).catch(() => {});
 }
 
+const mainMpv = new MpvMedia('main', { invoke, listen });
+mainMpv.track($('videoWrap'), { clip: () => document.querySelector('.player-pane').getBoundingClientRect() });
+/** Whatever currently shows the video: the <video> element or the mpv engine. */
+const media = () => player.media;
 const player = new Player(video, playerDeps, {
   interceptError: () => {
     if (quality.selected === 'auto') return false;
@@ -157,6 +185,7 @@ const player = new Player(video, playerDeps, {
   onStarted: (ctx) => {
     $('playerStatus').textContent = ''; $('playerError').textContent = ''; openSourceExternally.hidden = true;
     reportHealth(ctx.url, true);
+    engineMemory.set(ctx.channel?.streamUrl, engineOf(ctx.plan?.mode));
     updateRecordButton();
   },
   onRetry: (next, ctx, reason) => {
@@ -178,7 +207,10 @@ const player = new Player(video, playerDeps, {
       ? 'Cette chaîne ne diffuse aucune piste audio : l’absence de son vient de la source.'
       : 'La piste audio n’est pas décodée par macOS. Installez FFmpeg (brew install ffmpeg) pour la convertir.';
   },
-}, { watchdog: true });
+}, { watchdog: true, mpv: mainMpv });
+for (const type of ['emptied', 'loadstart']) {
+  mainMpv.addEventListener(type, () => $('videoWrap').classList.toggle('mpv-active', Boolean(mainMpv.getAttribute('src'))));
+}
 
 function youtubeBounds() {
   if (!$('modal').hidden || !$('dropOverlay').hidden || document.body.classList.contains('multiview-mode')) return null;
@@ -776,17 +808,20 @@ let progressTimer = 0;
 function saveProgressNow() {
   const playing = state.playing;
   const ctx = player.info;
-  if (!playing || !ctx || ctx.live || playing.catchup || !Number.isFinite(video.duration) || video.duration < 120 || video.currentTime < 1) return;
-  invoke('save_progress', { item: { url: playing.url, name: playing.name, position: video.currentTime, duration: video.duration, updatedAt: '', kind: playing.kind || 'movie', containerExtension: playing.channel?.containerExtension || null } })
+  const current = media();
+  if (!playing || !ctx || ctx.live || playing.catchup || !Number.isFinite(current.duration) || current.duration < 120 || current.currentTime < 1) return;
+  invoke('save_progress', { item: { url: playing.url, name: playing.name, position: current.currentTime, duration: current.duration, updatedAt: '', kind: playing.kind || 'movie', containerExtension: playing.channel?.containerExtension || null } })
     .then((progress) => { state.library.progress = progress; if (state.view === 'continue') render(); })
     .catch(() => {});
 }
-video.addEventListener('timeupdate', () => {
-  const now = Date.now();
-  if (now - progressTimer > 10_000) { progressTimer = now; saveProgressNow(); }
-});
-video.addEventListener('pause', saveProgressNow);
-video.addEventListener('ended', saveProgressNow);
+for (const target of [video, mainMpv]) {
+  target.addEventListener('timeupdate', () => {
+    const now = Date.now();
+    if (target === media() && now - progressTimer > 10_000) { progressTimer = now; saveProgressNow(); }
+  });
+  target.addEventListener('pause', () => { if (target === media()) saveProgressNow(); });
+  target.addEventListener('ended', () => { if (target === media()) saveProgressNow(); });
+}
 
 // ---------- Guide TV ----------
 
@@ -1058,6 +1093,17 @@ async function showSettings() {
     body.append(button(epg.loading ? 'Chargement en cours…' : 'Actualiser le guide maintenant', 'subtle full', () => { invoke('reload_epg'); toast('Actualisation du guide lancée.'); closeModal(); }));
 
     body.append(make('h3', 'settings-heading', 'Moteur de lecture'));
+    const engineChoices = [
+      ['auto', 'Automatique (recommandé)'],
+      ['system', 'Lecteur système en priorité (AirPlay, image dans l’image)'],
+      ['mpv', 'mpv en priorité (formats les plus variés)'],
+    ];
+    body.append(selectField('Moteur préféré', engineChoices, preferences.engine, (value) => { preferences.engine = value; savePreferences(); }));
+    body.append(make('p', 'muted', 'Automatique : le lecteur système pour les flux compatibles (AirPlay reste disponible), mpv pour les autres (HEVC en direct, MPEG-2, MKV, DASH, sons AC3/DTS…). Fluxo retient le moteur qui a fonctionné pour chaque chaîne, et l’autre moteur sert toujours de secours.'));
+    const mpvRow = make('div', `status-row${engine.mpv?.available ? '' : ' bad'}`);
+    mpvRow.append(make('strong', '', 'Moteur mpv'), make('small', '', engine.mpv?.available ? `Actif : ${engine.mpv.library}` : `Indisponible${engine.mpv?.error ? ` : ${engine.mpv.error}` : ''}. Installez-le avec brew install mpv, puis relancez Fluxo.`));
+    body.append(mpvRow);
+    body.append(button('Oublier le moteur retenu pour chaque chaîne', 'subtle full', () => { engineMemory.clear(); toast('Choix automatique réinitialisé.'); }));
     const ffmpeg = make('div', `status-row${engine.ffmpeg ? '' : ' bad'}`);
     ffmpeg.append(make('strong', '', 'Moteur de compatibilité FFmpeg'), make('small', '', engine.ffmpeg ? `Actif : ${engine.ffmpeg}` : 'Non installé. Pour lire MPEG-2, HEVC en TS, DASH, MKV ou AVI : brew install ffmpeg, puis relancez Fluxo.'));
     body.append(ffmpeg);
@@ -1073,6 +1119,16 @@ async function showSettings() {
       row.append(info, rename, button('↻', 'icon-button', async () => { try { const updated = await invoke('refresh_playlist', { id: playlist.id }); await refreshLibrary(); toast(`${updated.channels.length} médias actualisés.`); } catch (error) { toast(errorMessage(error), 'error'); } }), button('×', 'icon-button danger', async () => { if (!window.confirm(`Supprimer « ${playlist.name} » ?`)) return; await invoke('remove_playlist', { id: playlist.id }); if (playlist.id === 'local-media') { clearQueue(); if (state.playing?.url.startsWith('file:')) state.playing.channelId = null; } if (state.view === playlist.id) state.view = 'all'; await refreshLibrary(); showSettings(); }));
       body.append(row);
     }
+
+    body.append(make('h3', 'settings-heading', 'Mises à jour'));
+    body.append(make('p', 'muted', `Version installée : ${state.engine.version || '—'}. Les nouvelles versions sont publiées sur GitHub et vérifiées (signature) avant installation.`));
+    body.append(button('Rechercher une mise à jour', 'subtle full', async (event) => {
+      const target = event.currentTarget; target.disabled = true; target.textContent = 'Recherche…';
+      const info = await checkForUpdates();
+      target.disabled = false; target.textContent = 'Rechercher une mise à jour';
+      if (info) closeModal();
+    }));
+    body.append(checkboxField('Rechercher les mises à jour au démarrage', preferences.autoUpdate, (enabled) => { preferences.autoUpdate = enabled; savePreferences(); }));
 
     body.append(make('h3', 'settings-heading', 'Données'));
     const historyCount = state.library.recent.length + state.library.progress.length;
@@ -1144,9 +1200,13 @@ async function showStreamInfo() {
       ['Type', probe?.kind ? probe.kind.toUpperCase() : 'Local / non analysé'],
       ['Vidéo', probe?.video?.join(', ') || '—'],
       ['Audio', probe?.audioMissing ? 'Aucune piste audio dans le flux' : probe?.audio?.join(', ') || '—'],
-      ['Pistes audio décodées', video.audioTracks ? String(video.audioTracks.length) : '—'],
-      ['Résolution', video.videoWidth ? `${video.videoWidth}×${video.videoHeight}` : '—'],
+      ['Pistes audio décodées', media().audioTracks ? String(media().audioTracks.length) : '—'],
+      ['Résolution', media().videoWidth ? `${media().videoWidth}×${media().videoHeight}` : '—'],
     ];
+    if (player.engine === 'mpv') {
+      rows.push(['Décodage', mainMpv.info.hwdec && mainMpv.info.hwdec !== 'no' ? `Matériel (${mainMpv.info.hwdec})` : 'Logiciel']);
+      rows.push(['Codecs lus par mpv', [mainMpv.info.videoCodec, mainMpv.info.audioCodec].filter(Boolean).join(' · ') || '—']);
+    }
     if (probe?.encryption) rows.push(['Chiffrement', probe.encryption]);
     if (probe?.unsupported?.length) rows.push(['Non pris en charge par macOS', probe.unsupported.join(', ')]);
     const table = make('div', 'info-table');
@@ -1159,6 +1219,8 @@ async function showStreamInfo() {
     body.append(make('h3', 'settings-heading', 'Actions'));
     body.append(button('Recharger le flux', 'subtle full', () => { closeModal(); player.reload(); }));
     if (ctx.url && isWebUrl(ctx.url) && ctx.plan?.mode !== 'relay') body.append(button('Essayer via le relais local', 'subtle full', () => { closeModal(); player.force('relay'); }));
+    if (state.engine.mpv?.available && ctx.plan?.mode !== 'mpv') body.append(button('Lire avec le moteur mpv', 'subtle full', () => { closeModal(); player.force('mpv'); }));
+    if (ctx.plan?.mode === 'mpv') body.append(button('Revenir au lecteur système (AirPlay, image dans l’image)', 'subtle full', () => { closeModal(); player.force('native'); }));
     if (state.engine.ffmpeg && ctx.plan?.mode !== 'transcode') body.append(button('Forcer la conversion FFmpeg (corrige souvent l’absence de son)', 'subtle full', () => { closeModal(); player.force('transcode'); }));
     if (ctx.alternatives.length > 1) {
       body.append(make('h3', 'settings-heading', 'Autres sources de cette chaîne'));
@@ -1256,20 +1318,28 @@ async function importLocalMedia(paths) {
 // ---------- Commandes du lecteur ----------
 
 function updateControls() {
-  const duration = video.duration;
+  const current = media();
+  const duration = current.duration;
   const seekable = Number.isFinite(duration) && duration > 0;
   $('seek').disabled = !seekable;
   $('back10').disabled = !seekable; $('forward10').disabled = !seekable;
-  $('seek').value = seekable ? Math.round(video.currentTime / duration * 1000) : 0;
-  $('timeLabel').textContent = seekable ? `${timeText(video.currentTime)} / ${timeText(duration)}` : video.getAttribute('src') ? 'DIRECT' : '00:00 / 00:00';
-  $('togglePlay').textContent = video.paused ? '▶' : 'Ⅱ';
-  $('mute').textContent = video.muted || video.volume === 0 ? '◖×' : '◖))';
-  $('volume').value = video.muted ? 0 : video.volume;
+  $('seek').value = seekable ? Math.round(current.currentTime / duration * 1000) : 0;
+  $('timeLabel').textContent = seekable ? `${timeText(current.currentTime)} / ${timeText(duration)}` : current.getAttribute('src') ? 'DIRECT' : '00:00 / 00:00';
+  $('togglePlay').textContent = current.paused ? '▶' : 'Ⅱ';
+  $('mute').textContent = current.muted || current.volume === 0 ? '◖×' : '◖))';
+  $('volume').value = current.muted ? 0 : current.volume;
+}
+function togglePause() { const current = media(); if (current.paused) current.play()?.catch?.(() => {}); else current.pause(); }
+function toggleMute() { media().muted = !media().muted; updateControls(); }
+function seekBy(delta) {
+  const current = media();
+  if (Number.isFinite(current.duration)) current.currentTime = Math.max(0, Math.min(current.duration, current.currentTime + delta));
 }
 function renderSubtitles() {
   const overlay = $('subtitleOverlay');
   if (state.subtitleTrack === 'external') {
-    overlay.textContent = state.subtitleCues.filter((cue) => cue.start <= video.currentTime && cue.end >= video.currentTime).map((cue) => cue.text).join('\n');
+    const time = media().currentTime;
+    overlay.textContent = state.subtitleCues.filter((cue) => cue.start <= time && cue.end >= time).map((cue) => cue.text).join('\n');
     return;
   }
   if (state.subtitleTrack.startsWith('native:')) {
@@ -1282,6 +1352,8 @@ function renderSubtitles() {
 function selectSubtitleTrack(value) {
   state.subtitleTrack = value;
   Array.from(video.textTracks).forEach((track, index) => { track.mode = value === `native:${index}` ? 'hidden' : 'disabled'; });
+  // mpv draws the subtitles of the stream itself; external files use the HTML overlay.
+  if (player.engine === 'mpv') mainMpv.selectSubtitle(value.startsWith('mpv:') ? value.slice(4) : null);
   $('subtitleOptions').classList.toggle('subtitle-active', value !== 'off');
   renderSubtitles();
 }
@@ -1299,7 +1371,12 @@ async function loadSubtitleFile(reopen) {
 function appendSubtitleOptions(body, reopen) {
   const tracks = [['off', 'Désactivés']];
   if (state.subtitleCues.length) tracks.push(['external', 'Fichier externe']);
-  Array.from(video.textTracks).forEach((track, index) => tracks.push([`native:${index}`, track.label || track.language || `Piste ${index + 1}`]));
+  if (player.engine === 'mpv') {
+    for (const track of mainMpv.subtitleTracks()) {
+      tracks.push([`mpv:${track.id}`, track.label]);
+      if (track.selected && state.subtitleTrack === 'off') state.subtitleTrack = `mpv:${track.id}`;
+    }
+  } else Array.from(video.textTracks).forEach((track, index) => tracks.push([`native:${index}`, track.label || track.language || `Piste ${index + 1}`]));
   body.append(selectField('Sous-titres', tracks, state.subtitleTrack, selectSubtitleTrack));
   body.append(button('Importer un fichier SRT ou VTT', 'subtle full', () => loadSubtitleFile(reopen)));
   body.append(rangeField('Taille des sous-titres', 60, 200, subtitleSettings.size, '%', (value) => { subtitleSettings.size = value; applySubtitleSettings(); }));
@@ -1308,9 +1385,9 @@ function appendSubtitleOptions(body, reopen) {
 function showSubtitleOptions() { modal('Sous-titres', (body) => appendSubtitleOptions(body, showSubtitleOptions)); }
 function showPlayerOptions() {
   modal('Options du lecteur', (body) => {
-    body.append(selectField('Vitesse', [['0.5', '0,5×'], ['0.75', '0,75×'], ['1', 'Normale'], ['1.25', '1,25×'], ['1.5', '1,5×'], ['2', '2×']], String(video.playbackRate), (value) => { video.playbackRate = Number(value); }));
+    body.append(selectField('Vitesse', [['0.5', '0,5×'], ['0.75', '0,75×'], ['1', 'Normale'], ['1.25', '1,25×'], ['1.5', '1,5×'], ['2', '2×']], String(media().playbackRate), (value) => { media().playbackRate = Number(value); }));
     appendSubtitleOptions(body, showPlayerOptions);
-    const audioTracks = video.audioTracks;
+    const audioTracks = media().audioTracks;
     if (audioTracks?.length > 1) {
       body.append(selectField('Piste audio', Array.from(audioTracks).map((track, index) => [String(index), track.label || track.language || `Piste ${index + 1}`]), String(Array.from(audioTracks).findIndex((track) => track.enabled)), (selected) => {
         Array.from(audioTracks).forEach((track, index) => { track.enabled = index === Number(selected); });
@@ -1341,6 +1418,7 @@ const multiview = createMultiview($('multiview'), {
   deps: playerDeps,
   alternatives: (channel) => alternativesFor(channel, catalog.all, state.health),
   toast,
+  listen,
   onPromote: (channel) => { toggleMultiview(); playChannel(channel); },
 });
 let multiviewResume = null;
@@ -1367,11 +1445,62 @@ function toggleMultiview() {
 
 // ---------- AirPlay ----------
 
+/** AirPlay and picture in picture belong to the system player: switch to it first. */
+function needsSystemPlayer(feature) {
+  if (player.engine !== 'mpv') return false;
+  player.force('native');
+  toast(`${feature} : passage au lecteur système… Touchez à nouveau le bouton quand l’image apparaît.`);
+  return true;
+}
 if (window.WebKitPlaybackTargetAvailabilityEvent) {
   video.addEventListener('webkitplaybacktargetavailabilitychanged', (event) => { $('airplay').hidden = event.availability !== 'available'; });
-  $('airplay').onclick = () => video.webkitShowPlaybackTargetPicker?.();
+  $('airplay').onclick = () => { if (!needsSystemPlayer('AirPlay')) video.webkitShowPlaybackTargetPicker?.(); };
   $('airplay').title = 'AirPlay (les flux passant par le relais local ne sont pas transmissibles)';
 }
+
+// ---------- Mises à jour ----------
+// Releases are published on GitHub with a signed `latest.json`; the check runs at start-up
+// at most every 12 hours, and on demand from the settings.
+
+const UPDATE_INTERVAL = 12 * 3600 * 1000;
+function showUpdateBanner(info) {
+  $('updateTitle').textContent = `Fluxo ${info.version} est disponible`;
+  $('updateDetail').textContent = info.notes ? info.notes.split('\n').find((line) => line.trim())?.replace(/^[#*\-\s]+/, '') || '' : `Version installée : ${info.currentVersion}`;
+  $('updateInstall').disabled = false; $('updateLater').disabled = false;
+  $('updateBanner').hidden = false;
+}
+async function checkForUpdates({ silent = false } = {}) {
+  try {
+    const info = await invoke('check_update');
+    try { localStorage.setItem('fluxo-update-check', String(Date.now())); } catch { /* private storage */ }
+    if (info) showUpdateBanner(info);
+    else if (!silent) toast(`Fluxo ${state.engine.version} est à jour.`);
+    return info;
+  } catch (error) {
+    if (!silent) toast(errorMessage(error), 'error');
+    return null;
+  }
+}
+async function installUpdate() {
+  $('updateInstall').disabled = true; $('updateLater').disabled = true;
+  $('updateDetail').textContent = 'Téléchargement…';
+  saveProgressNow();
+  const unlisten = await listen('update-progress', (event) => {
+    const [received, total] = event.payload;
+    $('updateDetail').textContent = total ? `Téléchargement… ${Math.min(100, Math.round(received / total * 100))} %` : `Téléchargement… ${(received / 1_048_576).toFixed(1)} Mo`;
+  }).catch(() => null);
+  try {
+    await invoke('install_update');
+    $('updateDetail').textContent = 'Redémarrage…';
+  } catch (error) {
+    toast(errorMessage(error), 'error');
+    $('updateDetail').textContent = 'L’installation a échoué. Réessayez plus tard.';
+    $('updateInstall').disabled = false; $('updateLater').disabled = false;
+  } finally { unlisten?.(); }
+}
+function lastUpdateCheck() { try { return Number(localStorage.getItem('fluxo-update-check')) || 0; } catch { return 0; } }
+$('updateInstall').onclick = installUpdate;
+$('updateLater').onclick = () => { $('updateBanner').hidden = true; };
 
 // ---------- Événements ----------
 
@@ -1390,12 +1519,12 @@ $('filtersButton').onclick = showFilters; $('checkButton').onclick = () => check
 $('queuePrevious').onclick = () => playQueueIndex(state.queueIndex - 1);
 $('queueNext').onclick = () => playQueueIndex(state.queueIndex + 1);
 $('queueClear').onclick = clearQueue;
-$('togglePlay').onclick = () => { if (video.paused) video.play(); else video.pause(); };
-$('back10').onclick = () => { video.currentTime = Math.max(0, video.currentTime - 10); };
-$('forward10').onclick = () => { video.currentTime = Math.min(video.duration, video.currentTime + 10); };
-$('seek').oninput = (event) => { if (Number.isFinite(video.duration)) video.currentTime = Number(event.target.value) / 1000 * video.duration; };
-$('mute').onclick = () => { video.muted = !video.muted; updateControls(); };
-$('volume').oninput = (event) => { video.volume = Number(event.target.value); video.muted = video.volume === 0; updateControls(); };
+$('togglePlay').onclick = togglePause;
+$('back10').onclick = () => seekBy(-10);
+$('forward10').onclick = () => seekBy(10);
+$('seek').oninput = (event) => { const current = media(); if (Number.isFinite(current.duration)) current.currentTime = Number(event.target.value) / 1000 * current.duration; };
+$('mute').onclick = toggleMute;
+$('volume').oninput = (event) => { const current = media(); current.volume = Number(event.target.value); current.muted = current.volume === 0; updateControls(); };
 $('subtitleOptions').onclick = showSubtitleOptions;
 $('qualityOptions').onclick = showQualityOptions;
 $('recordButton').onclick = toggleRecording;
@@ -1404,11 +1533,12 @@ $('streamInfo').onclick = showStreamInfo;
 $('fullscreen').onclick = toggleFullscreen;
 $('pip').onclick = async () => {
   try {
+    if (needsSystemPlayer('Image dans l’image')) return;
     if (!document.pictureInPictureEnabled || !video.requestPictureInPicture) throw new Error('Image dans l’image non disponible sur ce Mac.');
     if (document.pictureInPictureElement) await document.exitPictureInPicture(); else await video.requestPictureInPicture();
   } catch (error) { toast(errorMessage(error), 'error'); }
 };
-$('videoWrap').ondblclick = (event) => { if (event.target === video) toggleFullscreen(); };
+$('videoWrap').ondblclick = (event) => { if (event.target === video || event.target === $('videoWrap')) toggleFullscreen(); };
 $('favoriteButton').onclick = () => state.playing?.channelId && toggleFavorite(state.playing.channelId);
 $('modalClose').onclick = closeModal; $('modal').onclick = (event) => { if (event.target === $('modal')) closeModal(); };
 let searchTimer = 0;
@@ -1422,22 +1552,26 @@ document.addEventListener('keydown', (event) => {
   const target = event.target;
   if (!$('modal').hidden || event.metaKey || event.ctrlKey || event.altKey) return;
   if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
-  const hasMedia = Boolean(video.getAttribute('src'));
+  const hasMedia = Boolean(media().getAttribute('src'));
   const key = event.key;
   if (key === 'ArrowUp' || key === 'PageUp') { event.preventDefault(); zap(-1); return; }
   if (key === 'ArrowDown' || key === 'PageDown') { event.preventDefault(); zap(1); return; }
   if (/^[0-9]$/.test(key)) { event.preventDefault(); zapDigit(key); return; }
   if (key === 'Backspace' && state.previous) { event.preventDefault(); showZap(state.previous.name); playChannel(state.previous); return; }
   if (key.toLowerCase() === 'i' && player.info) { showStreamInfo(); return; }
-  if (key.toLowerCase() === 'm') { video.muted = !video.muted; updateControls(); return; }
+  if (key.toLowerCase() === 'm') { toggleMute(); return; }
   if (!hasMedia) return;
-  if (key === ' ') { event.preventDefault(); if (video.paused) video.play(); else video.pause(); }
+  if (key === ' ') { event.preventDefault(); togglePause(); }
   if (key.toLowerCase() === 'f') toggleFullscreen();
-  if (key === 'ArrowLeft' && Number.isFinite(video.duration)) video.currentTime = Math.max(0, video.currentTime - 10);
-  if (key === 'ArrowRight' && Number.isFinite(video.duration)) video.currentTime = Math.min(video.duration, video.currentTime + 10);
+  if (key === 'ArrowLeft') seekBy(-10);
+  if (key === 'ArrowRight') seekBy(10);
 });
-for (const name of ['timeupdate', 'loadedmetadata', 'durationchange', 'play', 'pause', 'volumechange', 'emptied']) video.addEventListener(name, () => { updateControls(); renderSubtitles(); });
-video.addEventListener('ended', () => { if (state.queueIndex >= 0 && state.queueIndex + 1 < state.queue.length) playQueueIndex(state.queueIndex + 1); });
+for (const target of [video, mainMpv]) {
+  for (const name of ['timeupdate', 'loadedmetadata', 'durationchange', 'play', 'pause', 'volumechange', 'emptied']) {
+    target.addEventListener(name, () => { if (target === media()) { updateControls(); renderSubtitles(); } });
+  }
+  target.addEventListener('ended', () => { if (target === media() && state.queueIndex >= 0 && state.queueIndex + 1 < state.queue.length) playQueueIndex(state.queueIndex + 1); });
+}
 video.textTracks?.addEventListener?.('addtrack', (event) => { event.track.mode = 'disabled'; event.track.addEventListener('cuechange', renderSubtitles); });
 getCurrentWindow().onDragDropEvent(async (event) => {
   const { type } = event.payload;
@@ -1454,10 +1588,14 @@ setInterval(() => { if (state.view === 'guide') render(); else if (state.epg.pro
 
 (async () => {
   try {
+    // Video views left by a previous page load (development reloads) are removed.
+    await invoke('mpv_destroy_all').catch(() => {});
     const [engine, health] = await Promise.all([invoke('engine_info').catch(() => state.engine), invoke('get_health').catch(() => ({}))]);
     state.engine = engine;
     state.health = health;
     await refreshLibrary();
     await refreshEpgStatus();
+    if (engine.debugPlay) await playUrl(engine.debugPlay, 'Diagnostic');
+    if (preferences.autoUpdate && Date.now() - lastUpdateCheck() > UPDATE_INTERVAL) checkForUpdates({ silent: true });
   } catch (error) { toast(errorMessage(error), 'error'); }
 })();

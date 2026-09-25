@@ -1,0 +1,53 @@
+name: Publication
+# Publishes a GitHub release when a `vX.Y.Z` tag is pushed. Installed copies of Fluxo find it
+# through `latest.json` and update themselves; the archive is signed with the key stored in
+# the `TAURI_SIGNING_PRIVATE_KEY` secret.
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Version du tag
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Le tag $GITHUB_REF_NAME ne correspond pas à la version $version de tauri.conf.json"
+            exit 1
+          fi
+      - name: Clé de signature
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::Ajoutez le secret TAURI_SIGNING_PRIVATE_KEY (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+      - name: FFmpeg et mpv
+        run: brew install mpv
+      - run: npm ci
+      - name: Bibliothèques intégrées à Fluxo.app
+        run: python3 scripts/bundle_native.py
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Fluxo ${{ github.ref_name }}
+          releaseBody: |
+            Première installation : téléchargez le fichier .dmg, glissez Fluxo dans Applications, puis ouvrez-le avec clic droit → Ouvrir (application non notariée).
+            Les copies déjà installées se mettent à jour depuis Fluxo.
+          releaseDraft: false
+          prerelease: false
+          args: --bundles app,dmg --config src-tauri/tauri.native.conf.json --config src-tauri/tauri.updater.conf.json

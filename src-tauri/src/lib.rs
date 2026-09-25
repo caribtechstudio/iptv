@@ -1,6 +1,7 @@
 mod epg;
 mod health;
 mod local_media;
+pub mod mpv;
 pub mod net;
 pub mod probe;
 pub mod proxy;
@@ -8,6 +9,7 @@ mod recorder;
 pub mod segmenter;
 mod store;
 pub mod transcode;
+mod video_engine;
 mod xtream;
 
 use epg::{EpgRef, Guide, NowNext};
@@ -30,6 +32,7 @@ use std::{
 };
 use store::Store;
 use tauri::{AppHandle, Emitter, Manager};
+use video_engine::VideoEngine;
 
 const MAX_PLAYLIST_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_YOUTUBE_PAGE_BYTES: u64 = 4 * 1024 * 1024;
@@ -1266,6 +1269,11 @@ fn stream_status(app: AppHandle, session: String) -> proxy::SessionStatus {
 struct EngineInfo {
     ffmpeg: Option<String>,
     recordings_dir: String,
+    mpv: video_engine::EngineStatus,
+    platform: &'static str,
+    version: String,
+    /// Diagnostic: address played at start-up (`FLUXO_DEBUG_PLAY`).
+    debug_play: Option<String>,
 }
 
 #[tauri::command]
@@ -1273,7 +1281,178 @@ fn engine_info(app: AppHandle) -> EngineInfo {
     EngineInfo {
         ffmpeg: transcode::ffmpeg_path().map(|path| path.to_string_lossy().into_owned()),
         recordings_dir: app.state::<Services>().recorder.list().dir,
+        mpv: video_engine::status(),
+        platform: std::env::consts::OS,
+        version: app.package_info().version.to_string(),
+        debug_play: std::env::var("FLUXO_DEBUG_PLAY")
+            .ok()
+            .filter(|value| !value.is_empty()),
     }
+}
+
+// ---------- Mises à jour ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    version: String,
+    current_version: String,
+    notes: Option<String>,
+    date: Option<String>,
+}
+
+/// Update found by the last check, installed by `install_update`.
+#[derive(Default)]
+struct PendingUpdate(Mutex<Option<tauri_plugin_updater::Update>>);
+
+fn update_error(error: tauri_plugin_updater::Error) -> String {
+    use tauri_plugin_updater::Error;
+    match error {
+        Error::ReleaseNotFound => "Aucune version publiée sur GitHub pour l’instant.".into(),
+        Error::Reqwest(_) | Error::Network(_) => {
+            "GitHub est injoignable : vérifiez la connexion à Internet.".into()
+        }
+        Error::Minisign(_) | Error::SignatureUtf8(_) => {
+            "La mise à jour n’est pas signée par Fluxo : installation refusée.".into()
+        }
+        other => format!("Mise à jour impossible : {other}"),
+    }
+}
+
+/// Asks GitHub for a newer version (latest release's `latest.json`).
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app
+        .updater()
+        .map_err(update_error)?
+        .check()
+        .await
+        .map_err(update_error)?;
+    let info = update.as_ref().map(|update| UpdateInfo {
+        version: update.version.clone(),
+        current_version: update.current_version.clone(),
+        notes: update.body.clone().filter(|notes| !notes.trim().is_empty()),
+        date: update.date.map(|date| date.date().to_string()),
+    });
+    *app.state::<PendingUpdate>()
+        .0
+        .lock()
+        .map_err(|e| e.to_string())? = update;
+    Ok(info)
+}
+
+/// Downloads, verifies (signature) and installs the pending update, then restarts Fluxo.
+/// Progress is reported with `update-progress` events: `[received, total]`.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let pending = app
+        .state::<PendingUpdate>()
+        .0
+        .lock()
+        .map_err(|e| e.to_string())?
+        .take();
+    let update = match pending {
+        Some(update) => update,
+        None => {
+            use tauri_plugin_updater::UpdaterExt;
+            app.updater()
+                .map_err(update_error)?
+                .check()
+                .await
+                .map_err(update_error)?
+                .ok_or("Fluxo est déjà à jour.")?
+        }
+    };
+    let mut received: u64 = 0;
+    let progress = app.clone();
+    update
+        .download_and_install(
+            move |chunk, total| {
+                received += chunk as u64;
+                let _ = progress.emit("update-progress", (received, total));
+            },
+            || {},
+        )
+        .await
+        .map_err(update_error)?;
+    app.restart();
+}
+
+// ---------- Moteur mpv ----------
+
+#[tauri::command]
+async fn mpv_attach(app: AppHandle, surface: String) -> Result<(), String> {
+    blocking(move || app.state::<VideoEngine>().attach(&app, &surface)).await
+}
+
+#[tauri::command]
+async fn mpv_load(
+    app: AppHandle,
+    surface: String,
+    url: String,
+    headers: Option<StreamHeaders>,
+    start: Option<f64>,
+) -> Result<(), String> {
+    let url = match local_path(&url) {
+        Some(path) if !path.is_file() => return Err("Fichier introuvable.".into()),
+        Some(path) => path.to_string_lossy().into_owned(),
+        None => url,
+    };
+    blocking(move || {
+        app.state::<VideoEngine>()
+            .load(&surface, &url, &headers.unwrap_or_default(), start)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn mpv_command(app: AppHandle, surface: String, args: Vec<String>) -> Result<(), String> {
+    blocking(move || app.state::<VideoEngine>().command(&surface, &args)).await
+}
+
+#[tauri::command]
+async fn mpv_set(
+    app: AppHandle,
+    surface: String,
+    name: String,
+    value: String,
+) -> Result<(), String> {
+    blocking(move || app.state::<VideoEngine>().set(&surface, &name, &value)).await
+}
+
+#[tauri::command]
+async fn mpv_get(app: AppHandle, surface: String, name: String) -> Result<Option<String>, String> {
+    blocking(move || app.state::<VideoEngine>().get_property(&surface, &name)).await
+}
+
+#[tauri::command]
+async fn mpv_bounds(
+    app: AppHandle,
+    surface: String,
+    bounds: Option<video_engine::Bounds>,
+) -> Result<(), String> {
+    blocking(move || {
+        app.state::<VideoEngine>()
+            .set_bounds(&app, &surface, bounds)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn mpv_detach(app: AppHandle, surface: String) -> Result<(), String> {
+    blocking(move || app.state::<VideoEngine>().detach(&app, &surface)).await
+}
+
+#[tauri::command]
+async fn mpv_destroy(app: AppHandle, surface: String) -> Result<(), String> {
+    blocking(move || app.state::<VideoEngine>().destroy(&app, &surface)).await
+}
+
+/// Called when the page (re)loads: surfaces left by a previous page are removed.
+#[tauri::command]
+async fn mpv_destroy_all(app: AppHandle) -> Result<(), String> {
+    blocking(move || app.state::<VideoEngine>().destroy_all(&app)).await
 }
 
 // ---------- Disponibilité des chaînes ----------
@@ -1370,9 +1549,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             app.manage(Store::load(data.clone()));
+            app.manage(VideoEngine::default());
+            app.manage(PendingUpdate::default());
             app.manage(YoutubePlayerState {
                 generation: AtomicU64::new(0),
             });
@@ -1414,6 +1596,17 @@ pub fn run() {
             close_stream,
             stream_status,
             engine_info,
+            check_update,
+            install_update,
+            mpv_attach,
+            mpv_load,
+            mpv_command,
+            mpv_set,
+            mpv_get,
+            mpv_bounds,
+            mpv_detach,
+            mpv_destroy,
+            mpv_destroy_all,
             open_youtube_player,
             set_youtube_player_bounds,
             hide_youtube_player,

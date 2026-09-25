@@ -9,7 +9,7 @@
 .video-wrap:fullscreen video{height:100%}
 .player-controls{position:absolute;bottom:0;left:0;right:0;z-index:3;padding:35px 13px 10px;background:linear-gradient(transparent,#000b);opacity:0;transition:opacity .15s}
 .video-wrap:hover .player-controls,.video-wrap:focus-within .player-controls,.video-wrap:fullscreen .player-controls{opacity:1}
-.video-wrap:not(:has(video[src])) .player-controls{display:none}
+.video-wrap:not(:has(video[src])):not(.mpv-active) .player-controls{display:none}
 .player-controls button{background:#151b18bd;color:white;border:0;border-radius:6px;padding:5px 8px;min-width:29px;font-size:13px}
 .player-controls button:hover{background:#39433a}
 .player-controls button.subtitle-active{background:#b7ee7d;color:#16200e;font-weight:750}
@@ -192,3 +192,21 @@
 .title-row h1{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .title-edit{flex:none;border:0;background:none;color:#707773;font-size:17px;padding:4px 6px;border-radius:6px}
 .title-edit:hover{background:#232628;color:#c8f09e}
+
+/* mpv engine: the native video view lies below the page, which becomes transparent over it.
+   The window behind the page has the same colour as .main, so nothing else changes. */
+html:has(.mpv-active),html:has(.mpv-active) body,html:has(.mpv-active) .shell,html:has(.mpv-active) .main,html:has(.mpv-active) .content{background:transparent}
+html:has(.video-wrap.mpv-active) .player-pane,html:has(.video-wrap.mpv-active) .player-card{background:transparent}
+html:has(.video-wrap.mpv-active) .player-meta{background:#1b1f20}
+.video-wrap.mpv-active{background:transparent}
+.video-wrap.mpv-active video{visibility:hidden}
+html:has(.mv-cell.mpv-active) .multiview,html:has(.mv-cell.mpv-active) .mv-grid{background:transparent}
+.mv-cell.mpv-active{background:transparent}
+.mv-cell.mpv-active video{visibility:hidden}
+
+/* Update banner */
+.update-banner{position:fixed;left:20px;bottom:20px;z-index:9;display:flex;align-items:center;gap:10px;max-width:min(560px,calc(100vw - 40px));background:#202425;border:1px solid #526a48;border-radius:12px;padding:12px 14px;box-shadow:0 18px 50px #000a}
+.update-banner>div{display:grid;gap:3px;min-width:0;flex:1}
+.update-banner strong{font-size:13px;color:#c8f09e}
+.update-banner span{font-size:12px;color:#a4ada6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.update-banner button{flex:none;padding:8px 12px;font-size:12px}

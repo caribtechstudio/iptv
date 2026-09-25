@@ -1,10 +1,12 @@
 // Multiview: up to four channels at once. Only the selected cell plays its sound.
 
 import { Player } from './playback.js';
+import { MpvMedia } from './mpv-media.js';
 
 export const MAX_CELLS = 4;
 
-export function createMultiview(root, { deps, alternatives, onPromote, toast }) {
+/** `listen` enables the mpv engine in the cells (one instance per cell). */
+export function createMultiview(root, { deps, alternatives, onPromote, toast, listen }) {
   const cells = [];
   let active = -1;
   const grid = document.createElement('div');
@@ -20,6 +22,7 @@ export function createMultiview(root, { deps, alternatives, onPromote, toast }) 
     cells.forEach((cell, index) => {
       cell.element.classList.toggle('active', index === active);
       cell.video.muted = index !== active;
+      if (cell.mpv) cell.mpv.muted = index !== active;
     });
   }
 
@@ -29,6 +32,7 @@ export function createMultiview(root, { deps, alternatives, onPromote, toast }) 
     const index = cells.indexOf(cell);
     if (index < 0) return;
     cell.player.destroy();
+    cell.mpv?.destroy();
     cell.element.remove();
     cells.splice(index, 1);
     if (active >= cells.length) active = cells.length - 1;
@@ -57,14 +61,22 @@ export function createMultiview(root, { deps, alternatives, onPromote, toast }) 
     bar.append(title, status, promote, close);
     element.append(video, bar);
     grid.append(element);
+    // Surfaces are named by free slot so a removed cell's view is reused.
+    const slot = [0, 1, 2, 3].find((index) => !cells.some((cell) => cell.slot === index));
+    const mpv = listen ? new MpvMedia(`mv-${slot}`, { invoke: deps.invoke, listen }) : null;
+    if (mpv) {
+      mpv.muted = true;
+      mpv.track(element, { clip: () => root.getBoundingClientRect() });
+      for (const type of ['emptied', 'loadstart']) mpv.addEventListener(type, () => element.classList.toggle('mpv-active', Boolean(mpv.getAttribute('src'))));
+    }
     const player = new Player(video, deps, {
       onStatus: (text) => { status.textContent = text; },
       onStarted: () => { status.textContent = ''; },
       onRetry: () => { status.textContent = 'Nouvel essai…'; },
       onFailover: (ctx) => { status.textContent = `Autre source (${ctx.index + 1}/${ctx.alternatives.length})…`; },
       onFailure: (message) => { status.textContent = message; element.classList.add('failed'); },
-    }, { watchdog: true });
-    const cell = { channel, element, video, player };
+    }, { watchdog: true, mpv });
+    const cell = { channel, element, video, player, mpv, slot };
     cells.push(cell);
     element.onclick = (event) => { if (event.target === close || event.target === promote) return; focus(cells.indexOf(cell)); };
     close.onclick = () => remove(cell);

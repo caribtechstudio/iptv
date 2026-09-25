@@ -1,7 +1,7 @@
 [package]
 name = "fluxo"
-version = "0.3.0"
-description = "Lecteur IPTV et multimédia pour macOS"
+version = "0.4.0"
+description = "Lecteur IPTV et multimédia"
 authors = ["Fluxo"]
 edition = "2024"
 
@@ -27,7 +27,11 @@ flate2 = "1"
 keyring = "4.2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-opener = "2"
+libloading = "0.8"
+tauri-plugin-updater = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-foundation = { version = "0.3.2", features = ["NSString", "NSURL", "NSURLRequest"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", features = ["NSString", "NSURL", "NSURLRequest", "NSGeometry", "NSThread", "NSValue", "NSKeyValueCoding"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSView", "NSWindow", "NSResponder", "NSGraphics", "NSApplication", "NSRunningApplication", "NSColor"] }
 objc2-web-kit = { version = "0.3.2", features = ["WKNavigation", "WKWebView"] }

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Fluxo",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "app.fluxo.iptv",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -10,11 +10,39 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Fluxo", "width": 1200, "height": 760, "minWidth": 820, "minHeight": 560, "backgroundColor": "#111315" }],
+    "windows": [
+      {
+        "title": "Fluxo",
+        "width": 1200,
+        "height": 760,
+        "minWidth": 820,
+        "minHeight": 560,
+        "backgroundColor": "#111315"
+      }
+    ],
     "security": {
       "csp": "default-src 'self'; connect-src 'self' ipc: http: https:; img-src 'self' asset: http: https: data:; media-src 'self' asset: http: https: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'",
-      "assetProtocol": { "enable": true, "scope": [] }
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
     }
   },
-  "bundle": { "active": true, "targets": ["app"], "macOS": { "minimumSystemVersion": "13.0" } }
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcwQzQxNzk3MzU0OUQ4QjAKUldTdzJFazFseGZFY0UxYmRTMDZKK2MxVWhoYnYzVXIyTTFhQXNVbmZWVCtYYm4wMHFMbVdLTFkK",
+      "endpoints": [
+        "https://github.com/caribtechstudio/iptv/releases/latest/download/latest.json"
+      ]
+    }
+  }
 }

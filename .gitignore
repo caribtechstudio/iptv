@@ -10,3 +10,4 @@ debug/
 
 /Fluxo.app/
 src-tauri/gen/
+src-tauri/resources/native/

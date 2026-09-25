@@ -1,13 +1,23 @@
-// Playback engine: picks how a source is played (WebKit directly, local relay with headers,
-// MPEG-TS repackaging, FFmpeg conversion), escalates on failure, watches for frozen streams,
-// and fails over to other sources of the same channel.
+// Playback engine: picks how a source is played, escalates on failure, watches for frozen
+// streams, and fails over to other sources of the same channel.
+//
+// Two engines: the system player (WebKit <video>, directly, through the local relay, after
+// MPEG-TS repackaging or FFmpeg conversion), which keeps AirPlay and picture in picture, and
+// mpv, which decodes nearly every format itself. The preference (`auto`, `system`, `mpv`)
+// decides which one goes first; the other one remains a fallback.
 
 export const MODE_LABELS = {
   native: 'Lecture directe',
   relay: 'Relais local (en-têtes du fournisseur)',
   segmenter: 'Reconditionnement MPEG-TS → HLS',
   transcode: 'Conversion FFmpeg (compatibilité)',
+  mpv: 'Moteur mpv',
 };
+
+export const ENGINE_PREFERENCES = ['auto', 'system', 'mpv'];
+
+/** Engine family of a playback mode: what is remembered per channel. */
+export function engineOf(mode) { return mode === 'mpv' ? 'mpv' : 'system'; }
 
 const TS_EXTENSIONS = new Set(['ts', 'm2ts', 'mts']);
 const TRANSCODE_EXTENSIONS = new Set(['mkv', 'avi', 'wmv', 'flv', 'mpg', 'mpeg', 'vob', 'divx', '3gp']);
@@ -23,32 +33,47 @@ export function isLocalUrl(url = '') { return url.startsWith('file:'); }
 
 export function hasCustomHeaders(headers = {}) { return Boolean(headers.userAgent || headers.referrer); }
 
-export function initialPlan({ url, headers = {}, live = false, ffmpeg = false }) {
+/**
+ * First engine to try. `remembered` is the engine that last played this channel.
+ * Outside macOS the system player lacks HLS and most codecs, so mpv goes first.
+ */
+export function initialPlan({ url, headers = {}, live = false, ffmpeg = false, mpv = false, preference = 'auto', remembered = null, platform = 'macos' }) {
   const ext = urlExtension(url);
-  if (isLocalUrl(url)) {
+  const local = isLocalUrl(url);
+  if (mpv && (preference === 'mpv' || platform !== 'macos' || (preference === 'auto' && remembered === 'mpv'))) {
+    return { mode: 'mpv', live: local ? false : live };
+  }
+  // Formats the system player can only reach through a conversion: mpv reads them directly.
+  const convert = (planLive) => (mpv && preference !== 'system' ? { mode: 'mpv', live: planLive } : ffmpeg ? { mode: 'transcode', live: planLive } : null);
+  if (local) {
     if (TS_EXTENSIONS.has(ext)) return { mode: 'segmenter', live: false };
-    if (TRANSCODE_EXTENSIONS.has(ext) && ffmpeg) return { mode: 'transcode', live: false };
+    if (TRANSCODE_EXTENSIONS.has(ext)) return convert(false) || { mode: 'native', live: false };
     return { mode: 'native', live: false };
   }
   let path = '';
   try { path = new URL(url).pathname; } catch { /* invalid URLs fail in the player */ }
-  if (ext === 'mpd' && ffmpeg) return { mode: 'transcode', live };
+  if (ext === 'mpd') { const plan = convert(live); if (plan) return plan; }
   if (TS_EXTENSIONS.has(ext) || /\/(udp|rtp)\//i.test(path)) return { mode: 'segmenter', live };
-  if (TRANSCODE_EXTENSIONS.has(ext) && ffmpeg) return { mode: 'transcode', live: false };
+  if (TRANSCODE_EXTENSIONS.has(ext)) { const plan = convert(false); if (plan) return plan; }
   if (hasCustomHeaders(headers)) return { mode: 'relay', live };
   return { mode: 'native', live };
 }
 
 /** Next engine to try after a failure, or null when the source itself is unusable. */
-export function nextPlan({ probe, ffmpeg = false, tried = new Set(), url = '', live = false }) {
+export function nextPlan({ probe, ffmpeg = false, mpv = false, preference = 'auto', tried = new Set(), url = '', live = false }) {
   if (probe?.engine === 'none') return null;
+  const early = preference !== 'system';
   const order = [];
   if (probe?.engine === 'segmenter') order.push('segmenter');
-  if (probe?.engine === 'transcode') order.push('transcode');
+  // Codecs macOS cannot decode: mpv plays them as they are, FFmpeg has to convert them.
+  if (probe?.engine === 'transcode') order.push(...(early ? ['mpv', 'transcode'] : ['transcode']));
+  order.push('native');
   if (!isLocalUrl(url)) order.push('relay');
   else if (TS_EXTENSIONS.has(urlExtension(url))) order.push('segmenter');
-  order.push('transcode');
-  const mode = order.find((item) => !tried.has(item) && (item !== 'transcode' || ffmpeg));
+  if (early) order.push('mpv');
+  order.push('transcode', 'mpv');
+  const usable = (item) => !tried.has(item) && (item !== 'transcode' || ffmpeg) && (item !== 'mpv' || mpv);
+  const mode = order.find(usable);
   return mode ? { mode, live } : null;
 }
 
@@ -62,6 +87,8 @@ export function failureMessage(probe, ffmpeg, fallback, tried = new Set()) {
 }
 
 export function mediaErrorMessage(video) {
+  // The mpv facade carries its own error text.
+  if (video?.surface && video.error?.message) return `mpv n’a pas pu lire ce flux : ${video.error.message}`;
   switch (video?.error?.code) {
     case 2: return 'Une erreur réseau a interrompu la lecture.';
     case 3: return 'Le flux reçu ne peut pas être décodé par macOS.';
@@ -77,8 +104,10 @@ export function canCopyVideo(probe) {
 }
 
 export class Player {
+  /** `options.mpv` is an `MpvMedia` for this player, when the mpv engine exists. */
   constructor(video, deps, hooks = {}, options = {}) {
     this.video = video;
+    this.mpv = options.mpv || null;
     this.deps = deps;
     this.hooks = hooks;
     this.token = 0;
@@ -86,16 +115,25 @@ export class Player {
     this.session = null;
     this.lastTime = -1;
     this.lastProgress = 0;
-    video.addEventListener('error', () => {
-      if (!this.ctx || !video.getAttribute('src')) return;
-      if (this.hooks.interceptError?.(this.ctx)) return;
-      this.#failure(this.ctx, null);
-    });
-    video.addEventListener('playing', () => this.#onPlaying());
+    for (const media of [video, this.mpv].filter(Boolean)) {
+      media.addEventListener('error', () => {
+        if (!this.ctx || media !== this.media || !media.getAttribute('src')) return;
+        if (media === video && this.hooks.interceptError?.(this.ctx)) return;
+        this.#failure(this.ctx, null);
+      });
+      media.addEventListener('playing', () => { if (media === this.media) this.#onPlaying(); });
+    }
     if (options.watchdog) this.watchdog = setInterval(() => this.#watch(), 2000);
   }
 
   get info() { return this.ctx; }
+
+  /** The element (or mpv facade) currently showing the video. */
+  get media() { return this.ctx?.plan?.mode === 'mpv' && this.mpv ? this.mpv : this.video; }
+
+  get engine() { return engineOf(this.ctx?.plan?.mode); }
+
+  #mpvReady() { return Boolean(this.mpv && this.deps.mpv?.()); }
 
   async play(ctx) {
     const token = ++this.token;
@@ -107,6 +145,12 @@ export class Player {
     this.token += 1;
     this.ctx = null;
     this.#closeSession();
+    this.#clearVideo();
+    this.mpv?.stop();
+  }
+
+  #clearVideo() {
+    if (!this.video.getAttribute('src')) return;
     this.video.pause();
     this.video.removeAttribute('src');
     this.video.load();
@@ -117,14 +161,16 @@ export class Player {
   reload() {
     const ctx = this.ctx;
     if (!ctx?.plan) return;
-    ctx.resumeAt = ctx.live ? null : this.video.currentTime;
+    ctx.resumeAt = ctx.live ? null : this.media.currentTime;
     this.#load(ctx, ctx.plan);
   }
 
+  /** Switches the current source to another mode, keeping the position of a film. */
   force(mode) {
     const ctx = this.ctx;
     if (!ctx?.url) return;
     ctx.tried.add(mode);
+    ctx.resumeAt = ctx.live ? null : this.media.currentTime;
     this.#load(ctx, { mode, live: ctx.live });
   }
 
@@ -163,7 +209,10 @@ export class Player {
       ctx.probe = probe;
       this.hooks.onProbe?.(probe, ctx);
     });
-    await this.#load(ctx, initialPlan({ url: ctx.url, headers: ctx.headers, live: ctx.live, ffmpeg: this.deps.ffmpeg() }));
+    await this.#load(ctx, initialPlan({
+      url: ctx.url, headers: ctx.headers, live: ctx.live, ffmpeg: this.deps.ffmpeg(), mpv: this.#mpvReady(),
+      preference: this.deps.preference?.() || 'auto', remembered: this.deps.remembered?.(channel.streamUrl) || null, platform: this.deps.platform?.() || 'macos',
+    }));
   }
 
   async #load(ctx, plan) {
@@ -171,6 +220,22 @@ export class Player {
     ctx.tried.add(plan.mode);
     this.#closeSession();
     this.hooks.onPlan?.(plan, ctx);
+    this.lastTime = -1;
+    this.lastProgress = performance.now();
+    if (plan.mode === 'mpv') {
+      this.#clearVideo();
+      const start = Number.isFinite(ctx.resumeAt) && ctx.resumeAt > 0 ? ctx.resumeAt : null;
+      ctx.resumeAt = null;
+      this.hooks.onStatus?.('Ouverture avec mpv…', ctx);
+      try {
+        await this.mpv.open(ctx.url, { headers: ctx.headers, live: plan.live, start });
+        if (!this.#stale(ctx) && ctx.plan === plan) this.hooks.onLoaded?.(ctx, ctx.url);
+      } catch (error) {
+        if (!this.#stale(ctx) && ctx.plan === plan) this.#failure(ctx, errorText(error));
+      }
+      return;
+    }
+    this.mpv?.stop();
     let src;
     try {
       if (plan.mode === 'native') src = await this.deps.nativeSrc(ctx.url);
@@ -216,7 +281,7 @@ export class Player {
     if (this.#stale(ctx) || ctx.failing) return;
     ctx.failing = true;
     const plan = ctx.plan;
-    const mediaMessage = mediaErrorMessage(this.video);
+    const mediaMessage = mediaErrorMessage(this.media);
     this.hooks.onStatus?.('Analyse du flux…', ctx);
     const probe = await ctx.probePromise;
     if (this.#stale(ctx) || ctx.plan !== plan) return;
@@ -228,7 +293,7 @@ export class Player {
       } catch { /* the session may be gone */ }
     }
     ctx.lastErrors = errors;
-    const next = nextPlan({ probe, ffmpeg: this.deps.ffmpeg(), tried: ctx.tried, url: ctx.url || '', live: ctx.live });
+    const next = nextPlan({ probe, ffmpeg: this.deps.ffmpeg(), mpv: this.#mpvReady(), preference: this.deps.preference?.() || 'auto', tried: ctx.tried, url: ctx.url || '', live: ctx.live });
     if (next) {
       this.hooks.onRetry?.(next, ctx);
       this.#load(ctx, next);
@@ -265,6 +330,8 @@ export class Player {
     const probe = await ctx.probePromise;
     if (this.#stale(ctx)) return;
     if (probe?.audioMissing) { this.hooks.onAudioIssue?.('missing', ctx); return; }
+    // mpv decodes every audio codec itself.
+    if (ctx.plan?.mode === 'mpv') return;
     const tracks = this.video.audioTracks;
     if (probe?.audio?.length && tracks && tracks.length === 0) {
       if (ctx.plan?.mode !== 'transcode' && this.deps.ffmpeg()) {
@@ -277,7 +344,7 @@ export class Player {
 
   #watch() {
     const ctx = this.ctx;
-    const video = this.video;
+    const video = this.media;
     if (!ctx?.plan || ctx.failing || video.paused || video.ended || !video.getAttribute('src')) return;
     if (video.currentTime !== this.lastTime) {
       this.lastTime = video.currentTime;
