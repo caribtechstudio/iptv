@@ -1,37 +1,55 @@
+mod epg;
+mod health;
 mod local_media;
+pub mod net;
+pub mod probe;
+pub mod proxy;
+mod recorder;
+pub mod segmenter;
+mod store;
+pub mod transcode;
 mod xtream;
 
-use flate2::read::GzDecoder;
+use epg::{EpgRef, Guide, NowNext};
 use iptv_core::{
-    Channel, Library, Playlist, Program, RecentItem, XtreamAccount, is_hls_manifest, now_iso,
-    parse_m3u, parse_xmltv,
+    Channel, Library, Playlist, Program, Progress, RecentItem, XtreamAccount, is_hls_manifest,
+    m3u_epg_urls, now_iso, parse_m3u,
 };
+use net::StreamHeaders;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     io::Read,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
-use tauri::{AppHandle, Manager};
+use store::Store;
+use tauri::{AppHandle, Emitter, Manager};
 
 const MAX_PLAYLIST_BYTES: u64 = 20 * 1024 * 1024;
-const MAX_EPG_BYTES: u64 = 60 * 1024 * 1024;
 const MAX_YOUTUBE_PAGE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_HLS_MANIFEST_BYTES: u64 = 1024 * 1024;
-
-struct Store {
-    path: PathBuf,
-    library: Mutex<Library>,
-    programs: Mutex<Vec<Program>>,
-}
+const EPG_REFRESH: Duration = Duration::from_secs(6 * 3600);
+const MAX_PROGRESS: usize = 200;
 
 struct YoutubePlayerState {
     generation: AtomicU64,
+}
+
+struct EpgState {
+    guide: Mutex<Arc<Guide>>,
+    loading: AtomicBool,
+}
+
+struct Services {
+    proxy: Arc<proxy::Proxy>,
+    health: Arc<health::Health>,
+    recorder: recorder::Recorder,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -59,107 +77,27 @@ impl YoutubeBounds {
     }
 }
 
-impl Store {
-    fn load(path: PathBuf) -> Self {
-        let library = match fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(library) => library,
-                Err(_) => {
-                    let backup = path
-                        .with_extension(format!("json.corrupt.{}", chrono::Utc::now().timestamp()));
-                    let _ = fs::rename(&path, backup);
-                    Library::default()
-                }
-            },
-            Err(_) => Library::default(),
-        };
-        Self {
-            path,
-            library: Mutex::new(library),
-            programs: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn save(&self, library: &Library) -> Result<(), String> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        fs::write(
-            &tmp,
-            serde_json::to_vec_pretty(library).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        fs::rename(&tmp, &self.path).map_err(|e| e.to_string())
-    }
-
-    fn change<R>(&self, f: impl FnOnce(&mut Library) -> Result<R, String>) -> Result<R, String> {
-        let mut guard = self.library.lock().map_err(|e| e.to_string())?;
-        let mut next = guard.clone();
-        let result = f(&mut next)?;
-        self.save(&next)?;
-        *guard = next;
-        Ok(result)
-    }
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|error| error.to_string())?
 }
 
-fn read_source(source: &str, limit: u64) -> Result<String, String> {
-    let bytes = if source.starts_with("https://") || source.starts_with("http://") {
-        let response = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(25))
-            .user_agent("Fluxo/0.1")
-            .build()
-            .map_err(|e| e.to_string())?
-            .get(source)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| format!("Téléchargement impossible : {e}"))?;
-        if response.content_length().is_some_and(|len| len > limit) {
-            return Err("Fichier trop volumineux.".into());
-        }
-        let mut bytes = Vec::new();
-        response
-            .take(limit + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| e.to_string())?;
-        if bytes.len() as u64 > limit {
-            return Err("Fichier trop volumineux.".into());
-        }
-        bytes
-    } else {
-        let path = Path::new(source);
-        if !path.is_file() {
-            return Err("Fichier introuvable.".into());
-        }
-        if fs::metadata(path).map_err(|e| e.to_string())?.len() > limit {
-            return Err("Fichier trop volumineux.".into());
-        }
-        fs::read(path).map_err(|e| e.to_string())?
-    };
-    let bytes = if bytes.starts_with(&[0x1f, 0x8b]) {
-        let mut decoded = Vec::new();
-        GzDecoder::new(&bytes[..])
-            .take(limit + 1)
-            .read_to_end(&mut decoded)
-            .map_err(|e| format!("Archive GZip invalide : {e}"))?;
-        if decoded.len() as u64 > limit {
-            return Err("Fichier décompressé trop volumineux.".into());
-        }
-        decoded
-    } else {
-        bytes
-    };
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+struct Imported {
+    channels: Vec<Channel>,
+    epg_url: Option<String>,
 }
 
-fn import_channels(source: &str) -> Result<Vec<iptv_core::Channel>, String> {
-    let text = read_source(source, MAX_PLAYLIST_BYTES)?;
+fn import_channels(source: &str) -> Result<Imported, String> {
+    let text = net::read_source(source, MAX_PLAYLIST_BYTES)?;
     catalog_channels(source, &text)?.ok_or_else(|| {
         "Cette adresse est un flux HLS. Utilise « Lire une URL » pour le lancer.".into()
     })
 }
 
-fn parse_playlist_channels(source: &str, text: &str) -> Result<Vec<iptv_core::Channel>, String> {
+fn parse_playlist_channels(source: &str, text: &str) -> Result<Vec<Channel>, String> {
     let base = if source.starts_with("http") {
         Some(source.to_owned())
     } else {
@@ -170,11 +108,17 @@ fn parse_playlist_channels(source: &str, text: &str) -> Result<Vec<iptv_core::Ch
     parse_m3u(text, base.as_deref())
 }
 
-fn catalog_channels(source: &str, text: &str) -> Result<Option<Vec<Channel>>, String> {
+fn catalog_channels(source: &str, text: &str) -> Result<Option<Imported>, String> {
     if is_hls_manifest(text) {
         Ok(None)
     } else {
-        parse_playlist_channels(source, text).map(Some)
+        let epg_url = m3u_epg_urls(text);
+        parse_playlist_channels(source, text).map(|channels| {
+            Some(Imported {
+                channels,
+                epg_url: (!epg_url.is_empty()).then(|| epg_url.join(",")),
+            })
+        })
     }
 }
 
@@ -243,142 +187,9 @@ fn resolve_youtube_video_id(source: &str) -> Result<String, String> {
     if let Some(id) = youtube_video_id_from_url(source) {
         return Ok(id);
     }
-    let html = read_source(source, MAX_YOUTUBE_PAGE_BYTES)?;
+    let html = net::read_source(source, MAX_YOUTUBE_PAGE_BYTES)?;
     youtube_video_id_from_html(&html)
         .ok_or_else(|| "Aucune vidéo YouTube intégrable trouvée pour cette chaîne.".into())
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HlsManifest {
-    url: String,
-    text: String,
-}
-
-#[tauri::command]
-async fn fetch_hls_manifest(source: String) -> Result<HlsManifest, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let parsed = url::Url::parse(&source).map_err(|_| "Adresse HLS invalide.")?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err("Le flux HLS doit utiliser HTTP ou HTTPS.".into());
-        }
-        let response = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(12))
-            .user_agent("Fluxo/0.3")
-            .build()
-            .map_err(|error| error.to_string())?
-            .get(parsed)
-            .send()
-            .and_then(|response| response.error_for_status())
-            .map_err(|error| format!("Playlist HLS indisponible : {error}"))?;
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_HLS_MANIFEST_BYTES)
-        {
-            return Err("Playlist HLS trop volumineuse.".into());
-        }
-        let url = response.url().to_string();
-        let mut bytes = Vec::new();
-        response
-            .take(MAX_HLS_MANIFEST_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| error.to_string())?;
-        if bytes.len() as u64 > MAX_HLS_MANIFEST_BYTES {
-            return Err("Playlist HLS trop volumineuse.".into());
-        }
-        let text =
-            String::from_utf8(bytes).map_err(|_| "La playlist HLS n’est pas encodée en UTF-8.")?;
-        if !text.trim_start_matches('\u{feff}').starts_with("#EXTM3U") {
-            return Err("Cette adresse ne renvoie pas une playlist HLS.".into());
-        }
-        Ok(HlsManifest { url, text })
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-fn diagnose_stream_url(source: &str) -> Result<Option<String>, String> {
-    let parsed = url::Url::parse(source).map_err(|_| "Adresse du flux invalide.")?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("Le diagnostic requiert une adresse HTTP ou HTTPS.".into());
-    }
-    let hls = parsed.path().to_ascii_lowercase().ends_with(".m3u8");
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent("Fluxo/0.3")
-        .build()
-        .map_err(|error| error.to_string())?;
-    let mut request = client.get(parsed);
-    if !hls {
-        request = request.header(reqwest::header::RANGE, "bytes=0-0");
-    }
-    let response = match request.send() {
-        Ok(response) => response,
-        Err(error) if error.is_timeout() => {
-            return Ok(Some(
-                "Le serveur de cette chaîne ne répond pas (délai dépassé).".into(),
-            ));
-        }
-        Err(error) if error.is_connect() => {
-            return Ok(Some(
-                "Connexion impossible au serveur de cette chaîne.".into(),
-            ));
-        }
-        Err(_) => return Ok(Some("Le serveur de cette chaîne est inaccessible.".into())),
-    };
-
-    let status = response.status();
-    if !status.is_success() {
-        let message = match status.as_u16() {
-            401 => "Le serveur demande une authentification (HTTP 401).",
-            403 if response
-                .headers()
-                .get("x-deny-reason")
-                .is_some_and(|value| value == "deny_backend") =>
-            {
-                "Le serveur bloque l’accès à cette chaîne (HTTP 403 : protection du flux)."
-            }
-            403 => "Le serveur refuse l’accès à cette chaîne (HTTP 403).",
-            404 => "Cette adresse de flux est introuvable sur le serveur (HTTP 404).",
-            410 => "Ce flux a été retiré du serveur (HTTP 410).",
-            429 => "Le serveur limite les demandes de lecture (HTTP 429).",
-            500..=599 => {
-                return Ok(Some(format!(
-                    "Le serveur de cette chaîne est indisponible (HTTP {}).",
-                    status.as_u16()
-                )));
-            }
-            _ => {
-                return Ok(Some(format!(
-                    "Le serveur refuse le flux (HTTP {}).",
-                    status.as_u16()
-                )));
-            }
-        };
-        return Ok(Some(message.into()));
-    }
-
-    if hls {
-        let mut prefix = Vec::new();
-        response
-            .take(4096)
-            .read_to_end(&mut prefix)
-            .map_err(|error| error.to_string())?;
-        let text = String::from_utf8_lossy(&prefix);
-        if !text.trim_start_matches('\u{feff}').starts_with("#EXTM3U") || !is_hls_manifest(&text) {
-            return Ok(Some(
-                "Le serveur répond, mais ne renvoie pas une playlist vidéo HLS valide.".into(),
-            ));
-        }
-    }
-    Ok(None)
-}
-
-#[tauri::command]
-async fn diagnose_stream(source: String) -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || diagnose_stream_url(&source))
-        .await
-        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -498,22 +309,85 @@ fn hide_youtube_player(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HlsManifest {
+    url: String,
+    text: String,
+}
+
+#[tauri::command]
+async fn fetch_hls_manifest(source: String) -> Result<HlsManifest, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let parsed = url::Url::parse(&source).map_err(|_| "Adresse HLS invalide.")?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err("Le flux HLS doit utiliser HTTP ou HTTPS.".into());
+        }
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(12))
+            .user_agent(net::PLAYER_USER_AGENT)
+            .build()
+            .map_err(|error| error.to_string())?
+            .get(parsed)
+            .send()
+            .and_then(|response| response.error_for_status())
+            .map_err(|error| format!("Playlist HLS indisponible : {error}"))?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_HLS_MANIFEST_BYTES)
+        {
+            return Err("Playlist HLS trop volumineuse.".into());
+        }
+        let url = response.url().to_string();
+        let mut bytes = Vec::new();
+        response
+            .take(MAX_HLS_MANIFEST_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() as u64 > MAX_HLS_MANIFEST_BYTES {
+            return Err("Playlist HLS trop volumineuse.".into());
+        }
+        let text =
+            String::from_utf8(bytes).map_err(|_| "La playlist HLS n’est pas encodée en UTF-8.")?;
+        if !text.trim_start_matches('\u{feff}').starts_with("#EXTM3U") {
+            return Err("Cette adresse ne renvoie pas une playlist HLS.".into());
+        }
+        Ok(HlsManifest { url, text })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn new_id() -> Result<String, String> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos()
+        .to_string())
+}
+
+fn ensure_new_source(store: &Store, source: &str) -> Result<(), String> {
+    let exists = store.read(|library| library.playlists.iter().any(|p| p.source == source))?;
+    if exists {
+        Err("Cette playlist est déjà importée. Actualisez-la depuis Sources & guide TV.".into())
+    } else {
+        Ok(())
+    }
+}
+
 fn save_playlist(
     store: &Store,
     name: String,
     source: String,
-    channels: Vec<Channel>,
+    imported: Imported,
 ) -> Result<Playlist, String> {
     let playlist = Playlist {
-        id: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_nanos()
-            .to_string(),
+        id: new_id()?,
         name,
         source,
-        channels,
+        channels: imported.channels,
         updated_at: now_iso(),
+        epg_url: imported.epg_url,
     };
     store.change(|library| {
         library.playlists.push(playlist.clone());
@@ -523,12 +397,7 @@ fn save_playlist(
 
 #[tauri::command]
 fn get_library(app: AppHandle) -> Result<Library, String> {
-    Ok(app
-        .state::<Store>()
-        .library
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clone())
+    app.state::<Store>().read(Library::clone)
 }
 
 #[tauri::command]
@@ -538,14 +407,18 @@ async fn add_playlist(app: AppHandle, name: String, source: String) -> Result<Pl
     if name.is_empty() || source.is_empty() {
         return Err("Indique un nom et une source.".into());
     }
-    let app_clone = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let channels = import_channels(&source)?;
-        let store = app_clone.state::<Store>();
-        save_playlist(&store, name, source, channels)
+    let playlist = blocking({
+        let app = app.clone();
+        move || {
+            let store = app.state::<Store>();
+            ensure_new_source(&store, &source)?;
+            let imported = import_channels(&source)?;
+            save_playlist(&store, name, source, imported)
+        }
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .await?;
+    reload_epg_in_background(&app);
+    Ok(playlist)
 }
 
 #[tauri::command]
@@ -559,80 +432,107 @@ async fn add_playlist_if_catalog(
     if name.is_empty() || source.is_empty() {
         return Err("Indique un nom et une source.".into());
     }
-    let app_clone = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let text = read_source(&source, MAX_PLAYLIST_BYTES)?;
-        let Some(channels) = catalog_channels(&source, &text)? else {
-            return Ok(None);
-        };
-        let store = app_clone.state::<Store>();
-        save_playlist(&store, name, source, channels).map(Some)
+    let playlist = blocking({
+        let app = app.clone();
+        move || {
+            let text = net::read_source(&source, MAX_PLAYLIST_BYTES)?;
+            let Some(imported) = catalog_channels(&source, &text)? else {
+                return Ok(None);
+            };
+            let store = app.state::<Store>();
+            ensure_new_source(&store, &source)?;
+            save_playlist(&store, name, source, imported).map(Some)
+        }
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .await?;
+    if playlist.is_some() {
+        reload_epg_in_background(&app);
+    }
+    Ok(playlist)
+}
+
+fn find_account(store: &Store, id: &str) -> Result<XtreamAccount, String> {
+    store
+        .read(|library| {
+            library
+                .xtream_accounts
+                .iter()
+                .find(|item| item.id == id)
+                .cloned()
+        })?
+        .ok_or_else(|| "Compte Xtream introuvable.".into())
 }
 
 #[tauri::command]
 async fn refresh_playlist(app: AppHandle, id: String) -> Result<Playlist, String> {
-    let app_clone = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let store = app_clone.state::<Store>();
-        let source = store
-            .library
-            .lock()
-            .map_err(|e| e.to_string())?
-            .playlists
-            .iter()
-            .find(|item| item.id == id)
-            .ok_or("Playlist introuvable.")?
-            .source
-            .clone();
-        let channels = if source == local_media::PLAYLIST_SOURCE {
-            store
-                .library
-                .lock()
-                .map_err(|e| e.to_string())?
-                .playlists
-                .iter()
-                .find(|item| item.id == id)
-                .ok_or("Médias locaux introuvables.")?
-                .channels
-                .iter()
-                .filter(|channel| {
-                    url::Url::parse(&channel.stream_url)
-                        .ok()
-                        .and_then(|url| url.to_file_path().ok())
-                        .is_some_and(|path| path.is_file())
-                })
-                .cloned()
-                .collect()
-        } else if source.starts_with("xtream://") {
-            let account = store
-                .library
-                .lock()
-                .map_err(|e| e.to_string())?
-                .xtream_accounts
-                .iter()
-                .find(|item| format!("xtream://{}", item.id) == source)
-                .cloned()
-                .ok_or("Compte Xtream introuvable.")?;
-            xtream::import(&account, &xtream::password(&account.id)?)?
-        } else {
-            import_channels(&source)?
-        };
-        store.change(|library| {
-            let playlist = library
-                .playlists
-                .iter_mut()
-                .find(|item| item.id == id)
+    let playlist = blocking({
+        let app = app.clone();
+        move || {
+            let store = app.state::<Store>();
+            let (source, channels) = store
+                .read(|library| {
+                    library
+                        .playlists
+                        .iter()
+                        .find(|item| item.id == id)
+                        .map(|item| (item.source.clone(), item.channels.clone()))
+                })?
                 .ok_or("Playlist introuvable.")?;
-            playlist.channels = channels;
-            playlist.updated_at = now_iso();
-            Ok(playlist.clone())
-        })
+            let (imported, account_info) = if source == local_media::PLAYLIST_SOURCE {
+                let channels = channels
+                    .into_iter()
+                    .filter(|channel| {
+                        url::Url::parse(&channel.stream_url)
+                            .ok()
+                            .and_then(|url| url.to_file_path().ok())
+                            .is_some_and(|path| path.is_file())
+                    })
+                    .collect();
+                (
+                    Imported {
+                        channels,
+                        epg_url: None,
+                    },
+                    None,
+                )
+            } else if let Some(account_id) = source.strip_prefix("xtream://") {
+                let account = find_account(&store, account_id)?;
+                let (channels, info) = xtream::import(&account, &xtream::password(&account.id)?)?;
+                (
+                    Imported {
+                        channels,
+                        epg_url: None,
+                    },
+                    Some((account.id, info)),
+                )
+            } else {
+                (import_channels(&source)?, None)
+            };
+            store.change(|library| {
+                if let Some((account_id, info)) = account_info
+                    && let Some(account) = library
+                        .xtream_accounts
+                        .iter_mut()
+                        .find(|a| a.id == account_id)
+                {
+                    account.output_formats = info.output_formats;
+                    account.utc_offset = info.utc_offset;
+                }
+                let playlist = library
+                    .playlists
+                    .iter_mut()
+                    .find(|item| item.id == id)
+                    .ok_or("Playlist introuvable.")?;
+                playlist.channels = imported.channels;
+                playlist.epg_url = imported.epg_url;
+                playlist.updated_at = now_iso();
+                Ok(playlist.clone())
+            })
+        }
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .await?;
+    reload_epg_in_background(&app);
+    Ok(playlist)
 }
 
 #[derive(Serialize)]
@@ -646,7 +546,7 @@ struct LocalImport {
 
 #[tauri::command]
 async fn import_local_media(app: AppHandle, paths: Vec<String>) -> Result<LocalImport, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking(move || {
         let scan = local_media::scan(&paths)?;
         let playlist = app.state::<Store>().change(|library| {
             let playlist = if let Some(playlist) = library
@@ -673,6 +573,7 @@ async fn import_local_media(app: AppHandle, paths: Vec<String>) -> Result<LocalI
                     source: local_media::PLAYLIST_SOURCE.into(),
                     channels: scan.channels.clone(),
                     updated_at: now_iso(),
+                    epg_url: None,
                 };
                 library.playlists.push(playlist.clone());
                 playlist
@@ -687,54 +588,60 @@ async fn import_local_media(app: AppHandle, paths: Vec<String>) -> Result<LocalI
         })
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 fn remove_playlist(app: AppHandle, id: String) -> Result<(), String> {
-    let account = app
-        .state::<Store>()
-        .library
-        .lock()
-        .map_err(|e| e.to_string())?
-        .xtream_accounts
-        .iter()
-        .find(|item| item.id == id)
-        .cloned();
-    app.state::<Store>().change(|library| {
+    let store = app.state::<Store>();
+    let account = store.read(|library| library.xtream_accounts.iter().any(|item| item.id == id))?;
+    store.change(|library| {
+        let ids: std::collections::HashSet<String> = library
+            .playlists
+            .iter()
+            .find(|playlist| playlist.id == id)
+            .map(|playlist| {
+                playlist
+                    .channels
+                    .iter()
+                    .map(|channel| channel.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let urls: std::collections::HashSet<String> = library
+            .playlists
+            .iter()
+            .find(|playlist| playlist.id == id)
+            .map(|playlist| {
+                playlist
+                    .channels
+                    .iter()
+                    .map(|channel| channel.stream_url.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        library.favorites.retain(|favorite| !ids.contains(favorite));
         if id == local_media::PLAYLIST_ID {
-            let local_ids: std::collections::HashSet<_> = library
-                .playlists
-                .iter()
-                .find(|playlist| playlist.id == id)
-                .map(|playlist| {
-                    playlist
-                        .channels
-                        .iter()
-                        .map(|channel| channel.id.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            library
-                .favorites
-                .retain(|favorite| !local_ids.contains(favorite));
-            library
-                .recent
-                .retain(|recent| !local_ids.contains(&recent.url));
+            library.recent.retain(|recent| !urls.contains(&recent.url));
+            library.progress.retain(|item| !urls.contains(&item.url));
         }
         library.playlists.retain(|item| item.id != id);
         library.xtream_accounts.retain(|item| item.id != id);
+        let prefix = format!("xtream://{id}/");
         library
             .favorites
-            .retain(|favorite| !favorite.starts_with(&format!("xtream://{id}/")));
+            .retain(|favorite| !favorite.starts_with(&prefix));
         library
             .recent
-            .retain(|recent| !recent.url.starts_with(&format!("xtream://{id}/")));
+            .retain(|recent| !recent.url.starts_with(&prefix));
+        library
+            .progress
+            .retain(|item| !item.url.starts_with(&prefix));
         Ok(())
     })?;
-    if account.is_some() {
+    if account {
         let _ = xtream::keychain_entry(&id)?.delete_credential();
     }
+    reload_epg_in_background(&app);
     Ok(())
 }
 
@@ -752,41 +659,45 @@ async fn add_xtream_account(
         return Err("Indiquez un nom, un utilisateur et un mot de passe.".into());
     }
     let server = xtream::normalize_server(&server)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_nanos()
-            .to_string();
-        let account = XtreamAccount {
-            id: id.clone(),
-            server,
-            username,
-        };
-        let channels = xtream::import(&account, &password)?;
-        let entry = xtream::keychain_entry(&id)?;
-        entry
-            .set_password(&password)
-            .map_err(|_| "Impossible d’enregistrer le mot de passe dans le trousseau macOS.")?;
-        let playlist = Playlist {
-            id,
-            name,
-            source: format!("xtream://{}", account.id),
-            channels,
-            updated_at: now_iso(),
-        };
-        let result = app.state::<Store>().change(|library| {
-            library.xtream_accounts.push(account);
-            library.playlists.push(playlist.clone());
-            Ok(playlist)
-        });
-        if result.is_err() {
-            let _ = entry.delete_credential();
+    let playlist = blocking({
+        let app = app.clone();
+        move || {
+            let id = new_id()?;
+            let mut account = XtreamAccount {
+                id: id.clone(),
+                server,
+                username,
+                ..XtreamAccount::default()
+            };
+            let (channels, info) = xtream::import(&account, &password)?;
+            account.output_formats = info.output_formats;
+            account.utc_offset = info.utc_offset;
+            let entry = xtream::keychain_entry(&id)?;
+            entry
+                .set_password(&password)
+                .map_err(|_| "Impossible d’enregistrer le mot de passe dans le trousseau macOS.")?;
+            let playlist = Playlist {
+                id,
+                name,
+                source: format!("xtream://{}", account.id),
+                channels,
+                updated_at: now_iso(),
+                epg_url: None,
+            };
+            let result = app.state::<Store>().change(|library| {
+                library.xtream_accounts.push(account);
+                library.playlists.push(playlist.clone());
+                Ok(playlist)
+            });
+            if result.is_err() {
+                let _ = entry.delete_credential();
+            }
+            result
         }
-        result
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .await?;
+    reload_epg_in_background(&app);
+    Ok(playlist)
 }
 
 #[tauri::command]
@@ -795,27 +706,36 @@ async fn resolve_stream(
     reference: String,
     extension: Option<String>,
 ) -> Result<String, String> {
-    let account_id = xtream::account_id(&reference)?;
-    let account = app
-        .state::<Store>()
-        .library
-        .lock()
-        .map_err(|e| e.to_string())?
-        .xtream_accounts
-        .iter()
-        .find(|item| item.id == account_id)
-        .cloned()
-        .ok_or("Compte Xtream introuvable.")?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let account = find_account(&app.state::<Store>(), &xtream::account_id(&reference)?)?;
+    blocking(move || {
         xtream::resolve(
             &account,
-            &xtream::password(&account_id)?,
+            &xtream::password(&account.id)?,
             &reference,
             extension.as_deref(),
         )
     })
     .await
-    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn resolve_catchup(
+    app: AppHandle,
+    reference: String,
+    start: i64,
+    stop: i64,
+) -> Result<String, String> {
+    let account = find_account(&app.state::<Store>(), &xtream::account_id(&reference)?)?;
+    blocking(move || {
+        xtream::catchup(
+            &account,
+            &xtream::password(&account.id)?,
+            &reference,
+            start,
+            stop,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -823,34 +743,37 @@ async fn get_series_episodes(
     app: AppHandle,
     reference: String,
 ) -> Result<Vec<xtream::Episode>, String> {
-    let account_id = xtream::account_id(&reference)?;
-    let account = app
-        .state::<Store>()
-        .library
-        .lock()
-        .map_err(|e| e.to_string())?
-        .xtream_accounts
-        .iter()
-        .find(|item| item.id == account_id)
-        .cloned()
-        .ok_or("Compte Xtream introuvable.")?;
-    tauri::async_runtime::spawn_blocking(move || {
-        xtream::episodes(&account, &xtream::password(&account_id)?, &reference)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let account = find_account(&app.state::<Store>(), &xtream::account_id(&reference)?)?;
+    blocking(move || xtream::episodes(&account, &xtream::password(&account.id)?, &reference)).await
 }
 
 #[tauri::command]
-fn toggle_favorite(app: AppHandle, id: String) -> Result<bool, String> {
+fn toggle_favorite(app: AppHandle, id: String) -> Result<Vec<String>, String> {
     app.state::<Store>().change(|library| {
         if let Some(index) = library.favorites.iter().position(|item| item == &id) {
             library.favorites.remove(index);
-            Ok(false)
         } else {
             library.favorites.push(id);
-            Ok(true)
         }
+        Ok(library.favorites.clone())
+    })
+}
+
+#[tauri::command]
+fn reorder_favorites(app: AppHandle, ids: Vec<String>) -> Result<Vec<String>, String> {
+    app.state::<Store>().change(|library| {
+        let mut ordered: Vec<String> = ids
+            .into_iter()
+            .filter(|id| library.favorites.contains(id))
+            .collect();
+        ordered.dedup();
+        for id in &library.favorites {
+            if !ordered.contains(id) {
+                ordered.push(id.clone());
+            }
+        }
+        library.favorites = ordered;
+        Ok(library.favorites.clone())
     })
 }
 
@@ -860,7 +783,7 @@ fn record_recent(
     name: String,
     url: String,
     extension: Option<String>,
-) -> Result<(), String> {
+) -> Result<Vec<RecentItem>, String> {
     app.state::<Store>().change(|library| {
         library.recent.retain(|item| item.url != url);
         library.recent.insert(
@@ -873,50 +796,524 @@ fn record_recent(
             },
         );
         library.recent.truncate(30);
+        Ok(library.recent.clone())
+    })
+}
+
+#[tauri::command]
+fn set_hidden_groups(app: AppHandle, groups: Vec<String>) -> Result<Vec<String>, String> {
+    app.state::<Store>().change(|library| {
+        let mut groups = groups;
+        groups.sort();
+        groups.dedup();
+        library.hidden_groups = groups;
+        Ok(library.hidden_groups.clone())
+    })
+}
+
+#[tauri::command]
+fn save_progress(app: AppHandle, item: Progress) -> Result<Vec<Progress>, String> {
+    app.state::<Store>().change(|library| {
+        library.progress.retain(|existing| existing.url != item.url);
+        let finished = item.duration > 0.0 && item.position >= item.duration * 0.95;
+        if item.position >= 15.0 && !finished {
+            library.progress.insert(
+                0,
+                Progress {
+                    updated_at: now_iso(),
+                    ..item
+                },
+            );
+        }
+        library.progress.truncate(MAX_PROGRESS);
+        Ok(library.progress.clone())
+    })
+}
+
+#[tauri::command]
+fn clear_progress(app: AppHandle, url: String) -> Result<Vec<Progress>, String> {
+    app.state::<Store>().change(|library| {
+        library.progress.retain(|existing| existing.url != url);
+        Ok(library.progress.clone())
+    })
+}
+
+/// Empties « Récents » and « Reprendre ».
+#[tauri::command]
+fn clear_history(app: AppHandle) -> Result<(), String> {
+    app.state::<Store>().change(|library| {
+        library.recent.clear();
+        library.progress.clear();
         Ok(())
     })
+}
+
+/// Restores a blank library: playlists, Xtream accounts (and their keychain passwords),
+/// favourites, history, guide settings and availability results. Recordings on disk are kept.
+#[tauri::command]
+fn reset_app(app: AppHandle) -> Result<(), String> {
+    let accounts = app.state::<Store>().change(|library| {
+        let accounts: Vec<String> = library
+            .xtream_accounts
+            .iter()
+            .map(|account| account.id.clone())
+            .collect();
+        *library = Library::default();
+        Ok(accounts)
+    })?;
+    for id in accounts {
+        if let Ok(entry) = xtream::keychain_entry(&id) {
+            let _ = entry.delete_credential();
+        }
+    }
+    app.state::<Services>().health.clear();
+    if let Ok(mut current) = app.state::<EpgState>().guide.lock() {
+        *current = Arc::new(Guide::default());
+    }
+    let _ = app.emit("epg-updated", 0);
+    Ok(())
+}
+
+// ---------- Guide TV ----------
+
+const MAX_PLAYLIST_GUIDES: usize = 6;
+
+/// Interest per country: channels of the playlist, boosted by favourites and history.
+fn country_weights(library: &Library, playlist: &Playlist) -> HashMap<String, u64> {
+    let mut weights: HashMap<String, u64> = HashMap::new();
+    for channel in &playlist.channels {
+        if let Some(country) = &channel.country {
+            let mut weight = 1;
+            if library.favorites.contains(&channel.id) {
+                weight += 1000;
+            }
+            if library
+                .recent
+                .iter()
+                .any(|item| item.url == channel.stream_url)
+            {
+                weight += 300;
+            }
+            *weights.entry(country.to_ascii_uppercase()).or_default() += weight;
+        }
+    }
+    weights
+}
+
+/// Playlists such as Free-TV announce dozens of guides (one per country, plus a 190 MB
+/// "all sources" file). Keep every guide of short lists, otherwise the guides whose file
+/// name names a country present in the playlist, most relevant first.
+fn pick_guides(urls: &str, weights: &HashMap<String, u64>) -> Vec<String> {
+    let urls: Vec<String> = urls
+        .split(',')
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if urls.len() <= 3 {
+        return urls;
+    }
+    let mut scored: Vec<(u64, String)> = urls
+        .into_iter()
+        .filter_map(|url| {
+            let file = url.rsplit('/').next().unwrap_or("").to_ascii_uppercase();
+            if file.contains("ALL_SOURCES") || file.contains("ALL-SOURCES") {
+                return None;
+            }
+            let score = file
+                .split(|ch: char| !ch.is_ascii_alphanumeric())
+                .map(|token| token.trim_end_matches(|ch: char| ch.is_ascii_digit()))
+                .filter(|token| token.len() == 2)
+                .filter_map(|token| weights.get(token))
+                .max()
+                .copied()?;
+            Some((score, url))
+        })
+        .collect();
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored
+        .into_iter()
+        .take(MAX_PLAYLIST_GUIDES)
+        .map(|(_, url)| url)
+        .collect()
+}
+
+fn epg_sources(app: &AppHandle) -> Vec<epg::Source> {
+    let Ok((manual, playlists, accounts, ignore)) = app.state::<Store>().read(|library| {
+        (
+            library.epg_source.clone(),
+            library
+                .playlists
+                .iter()
+                .filter_map(|p| {
+                    p.epg_url.as_deref().map(|urls| {
+                        (
+                            p.name.clone(),
+                            pick_guides(urls, &country_weights(library, p)),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>(),
+            library.xtream_accounts.clone(),
+            library.ignore_playlist_epg,
+        )
+    }) else {
+        return Vec::new();
+    };
+    let mut sources = Vec::new();
+    if let Some(location) = manual.filter(|value| !value.trim().is_empty()) {
+        sources.push(epg::Source {
+            label: "Guide personnel".into(),
+            location,
+        });
+    }
+    if !ignore {
+        for (name, urls) in playlists {
+            for url in urls {
+                if !sources.iter().any(|source| source.location == url) {
+                    let file = url
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("")
+                        .split('?')
+                        .next()
+                        .unwrap_or("");
+                    sources.push(epg::Source {
+                        label: format!("Playlist « {name} » · {file}"),
+                        location: url,
+                    });
+                }
+            }
+        }
+        for account in accounts {
+            if let Ok(url) = xtream::password(&account.id)
+                .and_then(|password| xtream::xmltv_url(&account, &password))
+            {
+                let name = app
+                    .state::<Store>()
+                    .read(|library| {
+                        library
+                            .playlists
+                            .iter()
+                            .find(|p| p.id == account.id)
+                            .map(|p| p.name.clone())
+                    })
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "Xtream".into());
+                sources.push(epg::Source {
+                    label: format!("Xtream « {name} »"),
+                    location: url,
+                });
+            }
+        }
+    }
+    sources
+}
+
+fn reload_epg_in_background(app: &AppHandle) {
+    let state = app.state::<EpgState>();
+    if state.loading.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = app.emit("epg-loading", ());
+        let guide = Guide::load(epg_sources(&app), chrono::Utc::now().timestamp());
+        let count = guide.program_count();
+        let state = app.state::<EpgState>();
+        if let Ok(mut current) = state.guide.lock() {
+            *current = Arc::new(guide);
+        }
+        state.loading.store(false, Ordering::SeqCst);
+        let _ = app.emit("epg-updated", count);
+    });
+}
+
+fn guide(app: &AppHandle) -> Arc<Guide> {
+    app.state::<EpgState>()
+        .guide
+        .lock()
+        .map(|guide| guide.clone())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
 async fn set_epg_source(app: AppHandle, source: String) -> Result<usize, String> {
     let source = source.trim().to_owned();
+    if !source.is_empty() {
+        let check = source.clone();
+        blocking(move || {
+            net::read_source(&check, epg::MAX_EPG_BYTES)
+                .and_then(|text| iptv_core::parse_xmltv_guide(&text))
+                .map(|_| ())
+        })
+        .await?;
+    }
+    app.state::<Store>().change(|library| {
+        library.epg_source = (!source.is_empty()).then_some(source);
+        Ok(())
+    })?;
     let app_clone = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let programs = if source.is_empty() {
-            Vec::new()
-        } else {
-            parse_xmltv(&read_source(&source, MAX_EPG_BYTES)?)?
-        };
-        let store = app_clone.state::<Store>();
-        store.change(|library| {
-            library.epg_source = if source.is_empty() {
-                None
-            } else {
-                Some(source)
-            };
-            Ok(())
-        })?;
-        let count = programs.len();
-        *store.programs.lock().map_err(|e| e.to_string())? = programs;
-        Ok(count)
+    let guide = blocking(move || {
+        Ok(Guide::load(
+            epg_sources(&app_clone),
+            chrono::Utc::now().timestamp(),
+        ))
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .await?;
+    let count = guide.program_count();
+    if let Ok(mut current) = app.state::<EpgState>().guide.lock() {
+        *current = Arc::new(guide);
+    }
+    let _ = app.emit("epg-updated", count);
+    Ok(count)
 }
 
 #[tauri::command]
-fn get_programs(app: AppHandle, channel_id: String) -> Result<Vec<Program>, String> {
+fn set_playlist_epg(app: AppHandle, enabled: bool) -> Result<(), String> {
+    app.state::<Store>().change(|library| {
+        library.ignore_playlist_epg = !enabled;
+        Ok(())
+    })?;
+    reload_epg_in_background(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn reload_epg(app: AppHandle) {
+    reload_epg_in_background(&app);
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EpgStatus {
+    loading: bool,
+    programs: usize,
+    loaded_at: i64,
+    sources: Vec<epg::SourceStatus>,
+}
+
+#[tauri::command]
+fn epg_status(app: AppHandle) -> EpgStatus {
+    let guide = guide(&app);
+    EpgStatus {
+        loading: app.state::<EpgState>().loading.load(Ordering::SeqCst),
+        programs: guide.program_count(),
+        loaded_at: guide.loaded_at,
+        sources: guide.sources.clone(),
+    }
+}
+
+#[tauri::command]
+fn get_programs(
+    app: AppHandle,
+    reference: EpgRef,
+    from: Option<i64>,
+    to: Option<i64>,
+) -> Vec<Program> {
     let now = chrono::Utc::now().timestamp();
-    Ok(app
-        .state::<Store>()
-        .programs
-        .lock()
-        .map_err(|e| e.to_string())?
+    guide(&app).programs(
+        &reference,
+        from.unwrap_or(now),
+        to.unwrap_or(now + 86_400),
+        60,
+    )
+}
+
+#[tauri::command]
+fn get_now_next(app: AppHandle, references: Vec<EpgRef>) -> HashMap<String, NowNext> {
+    let now = chrono::Utc::now().timestamp();
+    let guide = guide(&app);
+    references
         .iter()
-        .filter(|item| item.channel_id == channel_id && item.stop > now && item.start < now + 86400)
-        .take(20)
-        .cloned()
-        .collect())
+        .take(600)
+        .filter_map(|reference| {
+            guide
+                .now_next(reference, now)
+                .map(|value| (reference.key.clone(), value))
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn get_guide(
+    app: AppHandle,
+    references: Vec<EpgRef>,
+    from: i64,
+    to: i64,
+) -> HashMap<String, Vec<Program>> {
+    let guide = guide(&app);
+    references
+        .iter()
+        .take(300)
+        .map(|reference| {
+            (
+                reference.key.clone(),
+                guide.programs(reference, from, to, 80),
+            )
+        })
+        .filter(|(_, programs)| !programs.is_empty())
+        .collect()
+}
+
+// ---------- Lecture : sonde, proxy, segmenteur, FFmpeg ----------
+
+#[tauri::command]
+async fn probe_stream(url: String, headers: Option<StreamHeaders>) -> Result<probe::Probe, String> {
+    blocking(move || Ok(probe::probe(&url, &headers.unwrap_or_default()))).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenStreamRequest {
+    url: String,
+    #[serde(default)]
+    headers: StreamHeaders,
+    /// `relay`, `segmenter` or `transcode`.
+    mode: String,
+    #[serde(default)]
+    live: bool,
+    #[serde(default)]
+    copy_video: bool,
+    #[serde(default)]
+    deinterlace: bool,
+}
+
+fn local_path(url: &str) -> Option<PathBuf> {
+    if url.starts_with("file:") {
+        url::Url::parse(url).ok()?.to_file_path().ok()
+    } else if url.starts_with('/') {
+        Some(PathBuf::from(url))
+    } else {
+        None
+    }
+}
+
+#[tauri::command]
+async fn open_stream(
+    app: AppHandle,
+    request: OpenStreamRequest,
+) -> Result<proxy::OpenedStream, String> {
+    let proxy = app.state::<Services>().proxy.clone();
+    blocking(move || {
+        let local = local_path(&request.url);
+        if let Some(path) = &local
+            && !path.is_file()
+        {
+            return Err("Fichier introuvable.".into());
+        }
+        match request.mode.as_str() {
+            "relay" => proxy.open_relay(&request.url, request.headers),
+            "segmenter" => {
+                let source = match local {
+                    Some(path) => segmenter::Source::File(path),
+                    None => segmenter::Source::Http {
+                        url: request.url.clone(),
+                        headers: request.headers,
+                    },
+                };
+                proxy.open_segmenter(source, request.live)
+            }
+            "transcode" => {
+                let input = local
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or(request.url.clone());
+                proxy.open_transcode(transcode::Options {
+                    input: &input,
+                    headers: &request.headers,
+                    live: request.live,
+                    copy_video: request.copy_video,
+                    deinterlace: request.deinterlace,
+                })
+            }
+            _ => Err("Mode de lecture inconnu.".into()),
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+fn close_stream(app: AppHandle, session: String) {
+    app.state::<Services>().proxy.close(&session);
+}
+
+#[tauri::command]
+fn stream_status(app: AppHandle, session: String) -> proxy::SessionStatus {
+    app.state::<Services>().proxy.status(&session)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EngineInfo {
+    ffmpeg: Option<String>,
+    recordings_dir: String,
+}
+
+#[tauri::command]
+fn engine_info(app: AppHandle) -> EngineInfo {
+    EngineInfo {
+        ffmpeg: transcode::ffmpeg_path().map(|path| path.to_string_lossy().into_owned()),
+        recordings_dir: app.state::<Services>().recorder.list().dir,
+    }
+}
+
+// ---------- Disponibilité des chaînes ----------
+
+#[tauri::command]
+fn check_channels(app: AppHandle, items: Vec<health::CheckItem>) -> usize {
+    let health = app.state::<Services>().health.clone();
+    health.enqueue(app.clone(), items.into_iter().take(2000).collect())
+}
+
+#[tauri::command]
+fn get_health(app: AppHandle) -> HashMap<String, health::HealthEntry> {
+    app.state::<Services>().health.snapshot()
+}
+
+#[tauri::command]
+fn report_health(app: AppHandle, url: String, ok: bool, message: Option<String>) {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        app.state::<Services>().health.record(
+            url,
+            health::HealthEntry {
+                ok,
+                message,
+                checked_at: chrono::Utc::now().timestamp(),
+            },
+        );
+    }
+}
+
+// ---------- Enregistrements ----------
+
+#[tauri::command]
+async fn start_recording(
+    app: AppHandle,
+    url: String,
+    headers: Option<StreamHeaders>,
+    name: String,
+) -> Result<recorder::RecordingInfo, String> {
+    let app_clone = app.clone();
+    blocking(move || {
+        app_clone.state::<Services>().recorder.start(
+            app_clone.clone(),
+            url,
+            headers.unwrap_or_default(),
+            name,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+fn stop_recording(app: AppHandle, id: String) {
+    app.state::<Services>().recorder.stop(&id);
+}
+
+#[tauri::command]
+fn list_recordings(app: AppHandle) -> recorder::Recordings {
+    app.state::<Services>().recorder.list()
 }
 
 #[tauri::command]
@@ -956,39 +1353,49 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
         .setup(|app| {
-            let path = app.path().app_data_dir()?.join("library.json");
-            app.manage(Store::load(path));
+            let data = app.path().app_data_dir()?;
+            app.manage(Store::load(data.clone()));
             app.manage(YoutubePlayerState {
                 generation: AtomicU64::new(0),
             });
-            let source = app
-                .state::<Store>()
-                .library
-                .lock()
-                .ok()
-                .and_then(|library| library.epg_source.clone());
-            if let Some(source) = source {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    if let Ok(text) = read_source(&source, MAX_EPG_BYTES)
-                        && let Ok(programs) = parse_xmltv(&text)
-                        && let Ok(mut guard) = handle.state::<Store>().programs.lock()
-                    {
-                        *guard = programs;
-                    }
-                });
-            }
+            app.manage(EpgState {
+                guide: Mutex::new(Arc::new(Guide::default())),
+                loading: AtomicBool::new(false),
+            });
+            let work = app.path().app_cache_dir()?.join("streams");
+            let recordings = app
+                .path()
+                .video_dir()
+                .unwrap_or_else(|_| data.join("recordings"))
+                .join("Fluxo");
+            app.manage(Services {
+                proxy: proxy::Proxy::start(work)?,
+                health: health::Health::load(data.join("health.json")),
+                recorder: recorder::Recorder::new(recordings),
+            });
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                loop {
+                    reload_epg_in_background(&handle);
+                    std::thread::sleep(EPG_REFRESH);
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_library,
             add_xtream_account,
             resolve_stream,
+            resolve_catchup,
             get_series_episodes,
             add_playlist,
             add_playlist_if_catalog,
             fetch_hls_manifest,
-            diagnose_stream,
+            probe_stream,
+            open_stream,
+            close_stream,
+            stream_status,
+            engine_info,
             open_youtube_player,
             set_youtube_player_bounds,
             hide_youtube_player,
@@ -996,9 +1403,26 @@ pub fn run() {
             refresh_playlist,
             remove_playlist,
             toggle_favorite,
+            reorder_favorites,
             record_recent,
+            set_hidden_groups,
+            save_progress,
+            clear_progress,
+            clear_history,
+            reset_app,
             set_epg_source,
+            set_playlist_epg,
+            reload_epg,
+            epg_status,
             get_programs,
+            get_now_next,
+            get_guide,
+            check_channels,
+            get_health,
+            report_health,
+            start_recording,
+            stop_recording,
+            list_recordings,
             allow_media_file,
             read_subtitle
         ])
@@ -1008,28 +1432,48 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        catalog_channels, diagnose_stream_url, youtube_video_id_from_html,
-        youtube_video_id_from_url,
-    };
-    use std::io::{BufRead, Write};
-    use std::net::TcpListener;
+    use super::{catalog_channels, youtube_video_id_from_html, youtube_video_id_from_url};
 
     #[test]
     fn m3u8_url_distinguishes_channel_catalog_from_hls_video() {
         let source = "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8";
         let catalog = "#EXTM3U x-tvg-url=\"https://example.org/guide.xml\"\n#EXTINF:-1 tvg-id=\"Kanali7.al\" group-title=\"Albania\",Kanali 7\nhttps://example.org/live/kanali7.m3u8";
-        let channels = catalog_channels(source, catalog).unwrap().unwrap();
-        assert_eq!(channels.len(), 1);
-        assert_eq!(channels[0].name, "Kanali 7");
-        assert_eq!(channels[0].group, "Albania");
+        let imported = catalog_channels(source, catalog).unwrap().unwrap();
+        assert_eq!(imported.channels.len(), 1);
+        assert_eq!(imported.channels[0].name, "Kanali 7");
+        assert_eq!(imported.channels[0].group, "Albania");
         assert_eq!(
-            channels[0].stream_url,
+            imported.channels[0].stream_url,
             "https://example.org/live/kanali7.m3u8"
+        );
+        assert_eq!(
+            imported.epg_url.as_deref(),
+            Some("https://example.org/guide.xml")
         );
 
         let hls = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsegment.ts";
         assert!(catalog_channels(source, hls).unwrap().is_none());
+    }
+
+    #[test]
+    fn picks_guides_of_the_countries_that_matter() {
+        let urls = "https://e/epg_ripper_AL1.xml.gz, https://e/epg_ripper_ALL_SOURCES1.xml.gz, https://e/epg_ripper_FR1.xml.gz, https://e/epg_ripper_RAKUTEN_FR1.xml.gz, https://e/epg_ripper_US1.xml.gz";
+        let weights =
+            std::collections::HashMap::from([("FR".to_owned(), 1200), ("US".to_owned(), 40)]);
+        let picked = super::pick_guides(urls, &weights);
+        assert_eq!(
+            picked[..2],
+            [
+                "https://e/epg_ripper_FR1.xml.gz",
+                "https://e/epg_ripper_RAKUTEN_FR1.xml.gz"
+            ]
+        );
+        assert_eq!(picked.len(), 3);
+        assert!(!picked.iter().any(|url| url.contains("ALL_SOURCES")));
+        assert_eq!(
+            super::pick_guides("https://a/x.xml,https://b/y.xml", &weights).len(),
+            2
+        );
     }
 
     #[test]
@@ -1047,34 +1491,5 @@ mod tests {
             youtube_video_id_from_url("https://youtube.com.evil.example/watch?v=NiRIbKwAejk")
                 .is_none()
         );
-    }
-
-    #[test]
-    fn stream_diagnostic_distinguishes_server_block_from_valid_hls() {
-        for (response, expected) in [
-            (
-                "HTTP/1.1 403 Forbidden\r\nX-Deny-Reason: deny_backend\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                Some("Le serveur bloque l’accès à cette chaîne (HTTP 403 : protection du flux)."),
-            ),
-            (
-                "HTTP/1.1 200 OK\r\nContent-Length: 32\r\nConnection: close\r\n\r\n#EXTM3U\n#EXT-X-TARGETDURATION:6\n",
-                None,
-            ),
-        ] {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = listener.local_addr().unwrap();
-            let server = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
-                    line.clear();
-                }
-                stream.write_all(response.as_bytes()).unwrap();
-            });
-            let diagnosis = diagnose_stream_url(&format!("http://{address}/index.m3u8")).unwrap();
-            assert_eq!(diagnosis.as_deref(), expected);
-            server.join().unwrap();
-        }
     }
 }

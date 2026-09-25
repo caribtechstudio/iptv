@@ -20,6 +20,46 @@ pub struct Episode {
 #[derive(Deserialize)]
 struct AuthResponse {
     user_info: Option<Value>,
+    server_info: Option<Value>,
+}
+
+/// Provider capabilities returned at login.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AccountInfo {
+    pub output_formats: Vec<String>,
+    pub utc_offset: Option<i32>,
+}
+
+fn account_info(parsed: &AuthResponse) -> AccountInfo {
+    let output_formats = parsed
+        .user_info
+        .as_ref()
+        .and_then(|info| info.get("allowed_output_formats"))
+        .and_then(Value::as_array)
+        .map(|formats| {
+            formats
+                .iter()
+                .filter_map(value_string)
+                .map(|format| format.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    // `time_now` is the provider's local clock, `timestamp_now` the UTC epoch.
+    let utc_offset = parsed.server_info.as_ref().and_then(|info| {
+        let local = chrono::NaiveDateTime::parse_from_str(
+            &property(info, "time_now")?,
+            "%Y-%m-%d %H:%M:%S",
+        )
+        .ok()?;
+        let epoch: i64 = property(info, "timestamp_now")?.parse().ok()?;
+        let offset = local.and_utc().timestamp() - epoch;
+        // Round to the quarter hour to absorb the delay between both fields.
+        Some(((offset as f64 / 900.0).round() * 900.0) as i32)
+    });
+    AccountInfo {
+        output_formats,
+        utc_offset,
+    }
 }
 
 pub fn normalize_server(raw: &str) -> Result<String, String> {
@@ -146,7 +186,7 @@ fn extension(value: Option<String>, default: &str) -> String {
     }
 }
 
-pub fn validate(account: &XtreamAccount, password: &str) -> Result<(), String> {
+pub fn validate(account: &XtreamAccount, password: &str) -> Result<AccountInfo, String> {
     let value = api(account, password, None, None)?;
     let parsed: AuthResponse =
         serde_json::from_value(value).map_err(|_| "Réponse de connexion Xtream invalide.")?;
@@ -155,7 +195,7 @@ pub fn validate(account: &XtreamAccount, password: &str) -> Result<(), String> {
         || auth == Some(&Value::from("1"))
         || auth == Some(&Value::from(true))
     {
-        Ok(())
+        Ok(account_info(&parsed))
     } else {
         Err("Identifiants Xtream refusés par le serveur.".into())
     }
@@ -180,8 +220,11 @@ fn categories(
     Ok(names)
 }
 
-pub fn import(account: &XtreamAccount, password: &str) -> Result<Vec<Channel>, String> {
-    validate(account, password)?;
+pub fn import(
+    account: &XtreamAccount,
+    password: &str,
+) -> Result<(Vec<Channel>, AccountInfo), String> {
+    let info = validate(account, password)?;
     let mut channels = Vec::new();
     for (category_action, stream_action, kind, prefix, fallback) in [
         (
@@ -242,6 +285,12 @@ pub fn import(account: &XtreamAccount, password: &str) -> Result<Vec<Channel>, S
                 None
             };
             let stream_url = format!("xtream://{}/{}/{}", account.id, prefix, id);
+            let archive = kind == ChannelKind::Live
+                && matches!(property(item, "tv_archive").as_deref(), Some("1" | "true"));
+            let catchup_days = archive
+                .then(|| property(item, "tv_archive_duration").and_then(|d| d.parse().ok()))
+                .flatten()
+                .filter(|days: &u32| *days > 0);
             channels.push(Channel {
                 id: stream_url.clone(),
                 name,
@@ -251,13 +300,15 @@ pub fn import(account: &XtreamAccount, password: &str) -> Result<Vec<Channel>, S
                 tvg_id: property(item, "epg_channel_id"),
                 kind: kind.clone(),
                 container_extension: ext,
+                catchup_days,
+                ..Channel::default()
             });
         }
     }
     if channels.is_empty() {
         Err("Aucun média trouvé sur ce compte Xtream.".into())
     } else {
-        Ok(channels)
+        Ok((channels, info))
     }
 }
 
@@ -294,13 +345,18 @@ pub fn resolve(
     if id != account.id || kind == "series" {
         return Err("Média Xtream invalide.".into());
     }
+    let live_format = live_format(account);
     let (folder, default) = match kind.as_str() {
-        "live" => ("live", "m3u8"),
+        "live" => ("live", live_format),
         "movie" => ("movie", "mp4"),
         "episode" => ("series", "mp4"),
         _ => return Err("Média Xtream invalide.".into()),
     };
-    let ext = extension(ext.map(str::to_owned), default);
+    let ext = if kind == "live" {
+        default.to_owned()
+    } else {
+        extension(ext.map(str::to_owned), default)
+    };
     let mut url = Url::parse(&account.server).map_err(|_| "Serveur Xtream invalide.")?;
     url.path_segments_mut()
         .map_err(|_| "Serveur Xtream invalide.")?
@@ -309,6 +365,59 @@ pub fn resolve(
         .push(&account.username)
         .push(password)
         .push(&format!("{stream_id}.{ext}"));
+    Ok(url.to_string())
+}
+
+/// HLS when the provider allows it, otherwise MPEG-TS (played through the segmenter).
+pub fn live_format(account: &XtreamAccount) -> &'static str {
+    if account.output_formats.is_empty() || account.output_formats.iter().any(|f| f == "m3u8") {
+        "m3u8"
+    } else {
+        "ts"
+    }
+}
+
+/// Catch-up address: `/timeshift/{user}/{pass}/{minutes}/{YYYY-MM-DD:HH-MM}/{id}.{ext}`,
+/// with the start expressed in the provider's clock.
+pub fn catchup(
+    account: &XtreamAccount,
+    password: &str,
+    reference: &str,
+    start: i64,
+    stop: i64,
+) -> Result<String, String> {
+    let (id, kind, stream_id) = parse_ref(reference)?;
+    if id != account.id || kind != "live" {
+        return Err("Le replay n’est disponible que pour les chaînes en direct.".into());
+    }
+    if stop <= start {
+        return Err("Programme invalide pour le replay.".into());
+    }
+    let minutes = ((stop - start) as f64 / 60.0).ceil() as i64;
+    let local =
+        chrono::DateTime::from_timestamp(start + i64::from(account.utc_offset.unwrap_or(0)), 0)
+            .ok_or("Horaire de replay invalide.")?;
+    let mut url = Url::parse(&account.server).map_err(|_| "Serveur Xtream invalide.")?;
+    url.path_segments_mut()
+        .map_err(|_| "Serveur Xtream invalide.")?
+        .pop_if_empty()
+        .push("timeshift")
+        .push(&account.username)
+        .push(password)
+        .push(&minutes.to_string())
+        .push(&local.format("%Y-%m-%d:%H-%M").to_string())
+        .push(&format!("{stream_id}.ts"));
+    Ok(url.to_string())
+}
+
+/// Guide published by the provider.
+pub fn xmltv_url(account: &XtreamAccount, password: &str) -> Result<String, String> {
+    let mut url = Url::parse(&account.server)
+        .and_then(|url| url.join("xmltv.php"))
+        .map_err(|_| "Adresse Xtream invalide.")?;
+    url.query_pairs_mut()
+        .append_pair("username", &account.username)
+        .append_pair("password", password);
     Ok(url.to_string())
 }
 
@@ -367,14 +476,45 @@ mod tests {
             "https://example.com/iptv/"
         );
         assert!(normalize_server("https://user:pass@example.com/").is_err());
-        let account = XtreamAccount {
+        let mut account = XtreamAccount {
             id: "abc".into(),
             server: "https://example.com/iptv/".into(),
             username: "a b".into(),
+            ..XtreamAccount::default()
         };
         let url = resolve(&account, "p/ss", "xtream://abc/movie/12", Some("mkv")).unwrap();
         assert_eq!(url, "https://example.com/iptv/movie/a%20b/p%2Fss/12.mkv");
         assert!(resolve(&account, "p", "xtream://other/movie/12", None).is_err());
+        assert!(
+            resolve(&account, "p", "xtream://abc/live/3", None)
+                .unwrap()
+                .ends_with("/3.m3u8")
+        );
+        account.output_formats = vec!["ts".into()];
+        assert!(
+            resolve(&account, "p", "xtream://abc/live/3", None)
+                .unwrap()
+                .ends_with("/3.ts")
+        );
+        account.utc_offset = Some(7200);
+        // 2026-09-24 18:00 UTC is 20:00 on a UTC+2 provider clock.
+        let replay = catchup(
+            &account,
+            "p",
+            "xtream://abc/live/3",
+            1_790_272_800,
+            1_790_276_400,
+        )
+        .unwrap();
+        assert_eq!(
+            replay,
+            "https://example.com/iptv/timeshift/a%20b/p/60/2026-09-24:20-00/3.ts"
+        );
+        assert!(
+            xmltv_url(&account, "p")
+                .unwrap()
+                .starts_with("https://example.com/iptv/xmltv.php?username=a+b")
+        );
     }
 
     #[test]
@@ -393,12 +533,14 @@ mod tests {
                     url.query_pairs().into_owned().collect();
                 assert_eq!(query.get("password").map(String::as_str), Some("secret"));
                 let body = match query.get("action").map(String::as_str) {
-                    None => r#"{"user_info":{"auth":1}}"#,
+                    None => {
+                        r#"{"user_info":{"auth":1,"allowed_output_formats":["ts"]},"server_info":{"time_now":"2026-09-24 20:00:05","timestamp_now":1790272800}}"#
+                    }
                     Some("get_live_categories") => {
                         r#"[{"category_id":"10","category_name":"Info"}]"#
                     }
                     Some("get_live_streams") => {
-                        r#"[{"stream_id":12,"name":"Journal","category_id":"10","epg_channel_id":"news"}]"#
+                        r#"[{"stream_id":12,"name":"Journal","category_id":"10","epg_channel_id":"news","tv_archive":1,"tv_archive_duration":"7"}]"#
                     }
                     Some("get_vod_categories") => "[]",
                     Some("get_vod_streams") => {
@@ -422,9 +564,13 @@ mod tests {
             id: "account".into(),
             server: format!("http://127.0.0.1:{port}/"),
             username: "user".into(),
+            ..XtreamAccount::default()
         };
-        let channels = import(&account, "secret").unwrap();
+        let (channels, info) = import(&account, "secret").unwrap();
         assert_eq!(channels.len(), 3);
+        assert_eq!(info.output_formats, vec!["ts"]);
+        assert_eq!(info.utc_offset, Some(7200));
+        assert_eq!(channels[0].catchup_days, Some(7));
         assert_eq!(channels[0].group, "TV · Info");
         assert_eq!(channels[1].container_extension.as_deref(), Some("mkv"));
         let episodes = episodes(&account, "secret", "xtream://account/series/56").unwrap();

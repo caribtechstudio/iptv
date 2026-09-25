@@ -13,7 +13,7 @@ const MAX_MEDIA: usize = 500;
 const MAX_DEPTH: usize = 8;
 const EXTENSIONS: &[&str] = &[
     "mp4", "m4v", "mov", "webm", "mkv", "avi", "ts", "mpg", "mpeg", "mp3", "m4a", "aac", "wav",
-    "aiff", "aif", "flac", "ogg", "opus",
+    "aiff", "aif", "flac", "ogg", "opus", "m2ts", "mts", "wmv", "flv",
 ];
 
 #[derive(Debug, Serialize)]
@@ -145,6 +145,7 @@ fn visit(
         tvg_id: None,
         kind: ChannelKind::Movie,
         container_extension: Some(ext),
+        ..Channel::default()
     });
 }
 
