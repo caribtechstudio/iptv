@@ -1,4 +1,6 @@
+mod converter;
 mod epg;
+mod export;
 mod health;
 mod local_media;
 pub mod mpv;
@@ -8,6 +10,7 @@ pub mod proxy;
 mod recorder;
 pub mod segmenter;
 mod store;
+pub mod thumbnails;
 pub mod transcode;
 mod video_engine;
 mod xtream;
@@ -398,7 +401,7 @@ fn save_playlist(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_library(app: AppHandle) -> Result<Library, String> {
     app.state::<Store>().read(Library::clone)
 }
@@ -594,7 +597,7 @@ async fn import_local_media(app: AppHandle, paths: Vec<String>) -> Result<LocalI
 }
 
 /// Only the small state file is rewritten: the catalogue keeps its `updated_at`.
-#[tauri::command]
+#[tauri::command(async)]
 fn rename_playlist(app: AppHandle, id: String, name: String) -> Result<(), String> {
     let name = name.trim().to_owned();
     if name.is_empty() {
@@ -611,7 +614,27 @@ fn rename_playlist(app: AppHandle, id: String, name: String) -> Result<(), Strin
     })
 }
 
+/// Writes the chosen playlists to M3U. Only the selected playlists are copied out of the store.
 #[tauri::command]
+async fn export_m3u(app: AppHandle, request: export::Request) -> Result<export::Outcome, String> {
+    blocking(move || {
+        let wanted: std::collections::HashSet<&String> = request.playlists.iter().collect();
+        let snapshot = app.state::<Store>().read(|library| Library {
+            playlists: library
+                .playlists
+                .iter()
+                .filter(|playlist| wanted.contains(&playlist.id))
+                .cloned()
+                .collect(),
+            xtream_accounts: library.xtream_accounts.clone(),
+            ..Library::default()
+        })?;
+        export::export(&snapshot, &request)
+    })
+    .await
+}
+
+#[tauri::command(async)]
 fn remove_playlist(app: AppHandle, id: String) -> Result<(), String> {
     let store = app.state::<Store>();
     let account = store.read(|library| library.xtream_accounts.iter().any(|item| item.id == id))?;
@@ -768,7 +791,7 @@ async fn get_series_episodes(
     blocking(move || xtream::episodes(&account, &xtream::password(&account.id)?, &reference)).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn toggle_favorite(app: AppHandle, id: String) -> Result<Vec<String>, String> {
     app.state::<Store>().change(|library| {
         if let Some(index) = library.favorites.iter().position(|item| item == &id) {
@@ -780,7 +803,7 @@ fn toggle_favorite(app: AppHandle, id: String) -> Result<Vec<String>, String> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn reorder_favorites(app: AppHandle, ids: Vec<String>) -> Result<Vec<String>, String> {
     app.state::<Store>().change(|library| {
         let mut ordered: Vec<String> = ids
@@ -798,7 +821,7 @@ fn reorder_favorites(app: AppHandle, ids: Vec<String>) -> Result<Vec<String>, St
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn record_recent(
     app: AppHandle,
     name: String,
@@ -821,7 +844,7 @@ fn record_recent(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_hidden_groups(app: AppHandle, groups: Vec<String>) -> Result<Vec<String>, String> {
     app.state::<Store>().change(|library| {
         let mut groups = groups;
@@ -832,7 +855,7 @@ fn set_hidden_groups(app: AppHandle, groups: Vec<String>) -> Result<Vec<String>,
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_progress(app: AppHandle, item: Progress) -> Result<Vec<Progress>, String> {
     app.state::<Store>().change(|library| {
         library.progress.retain(|existing| existing.url != item.url);
@@ -851,7 +874,7 @@ fn save_progress(app: AppHandle, item: Progress) -> Result<Vec<Progress>, String
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn clear_progress(app: AppHandle, url: String) -> Result<Vec<Progress>, String> {
     app.state::<Store>().change(|library| {
         library.progress.retain(|existing| existing.url != url);
@@ -860,7 +883,7 @@ fn clear_progress(app: AppHandle, url: String) -> Result<Vec<Progress>, String> 
 }
 
 /// Empties « Récents » and « Reprendre ».
-#[tauri::command]
+#[tauri::command(async)]
 fn clear_history(app: AppHandle) -> Result<(), String> {
     app.state::<Store>().change(|library| {
         library.recent.clear();
@@ -871,7 +894,7 @@ fn clear_history(app: AppHandle) -> Result<(), String> {
 
 /// Restores a blank library: playlists, Xtream accounts (and their keychain passwords),
 /// favourites, history, guide settings and availability results. Recordings on disk are kept.
-#[tauri::command]
+#[tauri::command(async)]
 fn reset_app(app: AppHandle) -> Result<(), String> {
     let accounts = app.state::<Store>().change(|library| {
         let accounts: Vec<String> = library
@@ -1091,7 +1114,7 @@ async fn set_epg_source(app: AppHandle, source: String) -> Result<usize, String>
     Ok(count)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_playlist_epg(app: AppHandle, enabled: bool) -> Result<(), String> {
     app.state::<Store>().change(|library| {
         library.ignore_playlist_epg = !enabled;
@@ -1101,7 +1124,7 @@ fn set_playlist_epg(app: AppHandle, enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn reload_epg(app: AppHandle) {
     reload_epg_in_background(&app);
 }
@@ -1115,7 +1138,7 @@ struct EpgStatus {
     sources: Vec<epg::SourceStatus>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn epg_status(app: AppHandle) -> EpgStatus {
     let guide = guide(&app);
     EpgStatus {
@@ -1126,7 +1149,7 @@ fn epg_status(app: AppHandle) -> EpgStatus {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_programs(
     app: AppHandle,
     reference: EpgRef,
@@ -1142,7 +1165,7 @@ fn get_programs(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_now_next(app: AppHandle, references: Vec<EpgRef>) -> HashMap<String, NowNext> {
     let now = chrono::Utc::now().timestamp();
     let guide = guide(&app);
@@ -1157,7 +1180,7 @@ fn get_now_next(app: AppHandle, references: Vec<EpgRef>) -> HashMap<String, NowN
         .collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_guide(
     app: AppHandle,
     references: Vec<EpgRef>,
@@ -1254,12 +1277,12 @@ async fn open_stream(
     .await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn close_stream(app: AppHandle, session: String) {
     app.state::<Services>().proxy.close(&session);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stream_status(app: AppHandle, session: String) -> proxy::SessionStatus {
     app.state::<Services>().proxy.status(&session)
 }
@@ -1276,7 +1299,7 @@ struct EngineInfo {
     debug_play: Option<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn engine_info(app: AppHandle) -> EngineInfo {
     EngineInfo {
         ffmpeg: transcode::ffmpeg_path().map(|path| path.to_string_lossy().into_owned()),
@@ -1449,6 +1472,11 @@ async fn mpv_destroy(app: AppHandle, surface: String) -> Result<(), String> {
     blocking(move || app.state::<VideoEngine>().destroy(&app, &surface)).await
 }
 
+#[tauri::command]
+async fn mpv_stats(app: AppHandle, surface: String) -> Result<video_engine::Stats, String> {
+    blocking(move || app.state::<VideoEngine>().stats(&surface)).await
+}
+
 /// Called when the page (re)loads: surfaces left by a previous page are removed.
 #[tauri::command]
 async fn mpv_destroy_all(app: AppHandle) -> Result<(), String> {
@@ -1457,18 +1485,18 @@ async fn mpv_destroy_all(app: AppHandle) -> Result<(), String> {
 
 // ---------- Disponibilité des chaînes ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn check_channels(app: AppHandle, items: Vec<health::CheckItem>) -> usize {
     let health = app.state::<Services>().health.clone();
     health.enqueue(app.clone(), items.into_iter().take(2000).collect())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_health(app: AppHandle) -> HashMap<String, health::HealthEntry> {
     app.state::<Services>().health.snapshot()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn report_health(app: AppHandle, url: String, ok: bool, message: Option<String>) {
     if url.starts_with("http://") || url.starts_with("https://") {
         app.state::<Services>().health.record(
@@ -1480,6 +1508,53 @@ fn report_health(app: AppHandle, url: String, ok: bool, message: Option<String>)
             },
         );
     }
+}
+
+// ---------- Convertisseur ----------
+
+#[tauri::command]
+async fn convert_catalog() -> Result<converter::Catalog, String> {
+    blocking(|| Ok(converter::catalog())).await
+}
+
+#[tauri::command]
+async fn convert_add(
+    app: AppHandle,
+    paths: Vec<String>,
+    options: converter::Options,
+) -> Result<Vec<converter::JobInfo>, String> {
+    blocking(move || {
+        app.state::<converter::Converter>()
+            .add(&app, paths, options)
+    })
+    .await
+}
+
+#[tauri::command(async)]
+fn convert_jobs(app: AppHandle) -> Vec<converter::JobInfo> {
+    app.state::<converter::Converter>().jobs()
+}
+
+#[tauri::command(async)]
+fn convert_cancel(app: AppHandle, id: u64) {
+    app.state::<converter::Converter>().cancel(&app, id);
+}
+
+#[tauri::command(async)]
+fn convert_clear(app: AppHandle) -> Vec<converter::JobInfo> {
+    app.state::<converter::Converter>().clear()
+}
+
+// ---------- Vignettes ----------
+
+#[tauri::command]
+async fn video_thumbnails(app: AppHandle, request: thumbnails::Request) -> Result<(), String> {
+    blocking(move || app.state::<thumbnails::Thumbnails>().start(&app, request)).await
+}
+
+#[tauri::command(async)]
+fn cancel_thumbnails(app: AppHandle) {
+    app.state::<thumbnails::Thumbnails>().cancel();
 }
 
 // ---------- Enregistrements ----------
@@ -1503,17 +1578,17 @@ async fn start_recording(
     .await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stop_recording(app: AppHandle, id: String) {
     app.state::<Services>().recorder.stop(&id);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_recordings(app: AppHandle) -> recorder::Recordings {
     app.state::<Services>().recorder.list()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn allow_media_file(app: AppHandle, path: String) -> Result<String, String> {
     let canonical = Path::new(&path).canonicalize().map_err(|e| e.to_string())?;
     if !canonical.is_file() {
@@ -1525,7 +1600,7 @@ fn allow_media_file(app: AppHandle, path: String) -> Result<String, String> {
     Ok(canonical.to_string_lossy().into_owned())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn read_subtitle(path: String) -> Result<String, String> {
     let path = Path::new(&path);
     let valid = path
@@ -1554,6 +1629,8 @@ pub fn run() {
             let data = app.path().app_data_dir()?;
             app.manage(Store::load(data.clone()));
             app.manage(VideoEngine::default());
+            app.manage(converter::Converter::default());
+            app.manage(thumbnails::Thumbnails::default());
             app.manage(PendingUpdate::default());
             app.manage(YoutubePlayerState {
                 generation: AtomicU64::new(0),
@@ -1603,6 +1680,7 @@ pub fn run() {
             mpv_command,
             mpv_set,
             mpv_get,
+            mpv_stats,
             mpv_bounds,
             mpv_detach,
             mpv_destroy,
@@ -1613,6 +1691,7 @@ pub fn run() {
             import_local_media,
             refresh_playlist,
             rename_playlist,
+            export_m3u,
             remove_playlist,
             toggle_favorite,
             reorder_favorites,
@@ -1636,10 +1715,35 @@ pub fn run() {
             stop_recording,
             list_recordings,
             allow_media_file,
-            read_subtitle
+            read_subtitle,
+            convert_catalog,
+            convert_add,
+            convert_jobs,
+            convert_cancel,
+            convert_clear,
+            video_thumbnails,
+            cancel_thumbnails
         ])
-        .run(tauri::generate_context!())
-        .expect("Impossible de lancer Fluxo");
+        .build(tauri::generate_context!())
+        .expect("Impossible de lancer Fluxo")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                shutdown(app);
+            }
+        });
+}
+
+/// Child processes do not end with Fluxo: conversions, recordings and FFmpeg players are
+/// stopped so nothing keeps running (and writing) after the window is closed. mpv lives in
+/// this process and ends with it.
+fn shutdown(app: &AppHandle) {
+    if let Some(converter) = app.try_state::<converter::Converter>() {
+        converter.shutdown();
+    }
+    if let Some(services) = app.try_state::<Services>() {
+        services.proxy.close_all();
+        services.recorder.stop_all(Duration::from_secs(4));
+    }
 }
 
 #[cfg(test)]

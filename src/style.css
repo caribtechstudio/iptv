@@ -177,15 +177,17 @@
 .group-option-name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .group-option.selected .group-option-name::before{content:"✓ ";color:#b7ee7d}
 .group-option-count{flex:none;color:#818a84;font-size:11px;font-variant-numeric:tabular-nums}
-.group-pin{flex:none;border:0;background:none;padding:6px 8px;font-size:12px;filter:grayscale(1);opacity:0;transition:opacity .1s}
-.group-option:hover .group-pin,.group-option.active .group-pin{opacity:.45}
-.group-pin.on,.group-option:hover .group-pin.on,.group-option.active .group-pin.on{filter:none;opacity:1}
+.group-pin{flex:none;display:grid;place-items:center;border:0;background:none;color:#9ea7a1;padding:6px 8px;opacity:0;transition:opacity .1s}
+.group-pin .icon{width:14px;height:14px}
+.group-option:hover .group-pin,.group-option.active .group-pin{opacity:.6}
+.group-pin:hover{color:#fff}
+.group-pin.on,.group-option:hover .group-pin.on,.group-option.active .group-pin.on{color:#b7ee7d;opacity:1}
 .group-empty{color:#8d978f;font-size:12px;text-align:center;padding:18px}
 .group-panel-hint{margin:0;padding:7px 12px;border-top:1px solid #333a36;color:#6f7973;font-size:10px}
 .group-filters{display:flex;flex-wrap:wrap;gap:6px;margin:-2px 0 11px}
 .group-filters button{max-width:170px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid #343938;border-radius:20px;background:none;color:#a1a8a4;padding:5px 11px;font-size:11px}
 .group-filters button:hover{background:#1f2421;color:#dfe6df}
-.group-filters button.pinned::before{content:"📌";font-size:9px;margin-right:4px}
+.group-filters button.pinned::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:#b7ee7d;margin-right:6px;vertical-align:1px}
 .group-filters button.selected{background:#2b3829;color:#c8f09e;border-color:#526a48}
 .group-filters button.selected::after{content:" ×";opacity:.8}
 .title-row{display:flex;align-items:center;gap:8px;min-width:0}
@@ -210,3 +212,171 @@ html:has(.mv-cell.mpv-active) .multiview,html:has(.mv-cell.mpv-active) .mv-grid{
 .update-banner strong{font-size:13px;color:#c8f09e}
 .update-banner span{font-size:12px;color:#a4ada6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .update-banner button{flex:none;padding:8px 12px;font-size:12px}
+
+/* Lucide icons */
+.icon{width:1.15em;height:1.15em;flex:none;display:inline-block;vertical-align:-.2em;overflow:visible}
+button:has(>.icon){display:inline-flex;align-items:center;justify-content:center;gap:7px}
+.main-nav button,.playlist-nav button{justify-content:flex-start}
+.main-nav .icon{width:18px;height:18px;margin-right:6px;opacity:.9}
+.brand-icon .icon{width:15px;height:15px;fill:currentColor;margin-left:2px}
+.sidebar-heading button{display:grid;place-items:center;border-radius:6px;padding:3px}
+.sidebar-heading button:hover{background:#232628;color:#fff}
+.sidebar-heading .icon{width:16px;height:16px}
+.sidebar-bottom button{font-size:13px;gap:12px;justify-content:flex-start}
+.sidebar-bottom .icon{width:18px;height:18px}
+.sidebar-badge{margin-left:auto;min-width:19px;height:19px;border-radius:10px;background:#b7ee7d;color:#16200e;font-size:11px;font-weight:750;display:grid;place-items:center;padding:0 5px;font-variant-numeric:tabular-nums}
+.top-actions .icon{width:15px;height:15px}
+.search-wrap>.icon{width:17px;height:17px;color:#89918d}
+.filter-button .icon{width:13px;height:13px}
+.filter-button{display:inline-flex;align-items:center;gap:6px}
+.group-picker-chevron.icon{width:14px;height:14px}
+.group-clear{display:grid;place-items:center;padding:0}
+.group-clear .icon{width:15px;height:15px}
+.title-edit{display:grid;place-items:center}
+.title-edit .icon{width:17px;height:17px}
+.empty-icon .icon{width:34px;height:34px;stroke-width:1.6}
+.empty-glyph .icon{width:24px;height:24px;fill:#b7ee7d;margin-left:3px}
+.star,.row-action{display:grid;place-items:center}
+.star .icon{width:18px;height:18px}
+.star.on .icon,.meta-button.on .icon{fill:currentColor}
+.star.on{color:#d9f5a8}
+.row-action .icon{width:15px;height:15px}
+.icon-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:28px}
+.icon-button .icon{width:15px;height:15px}
+.with-icon .icon{width:15px;height:15px}
+.close{display:grid;place-items:center;border-radius:7px;padding:4px}
+.close:hover{background:#2c3230;color:#fff}
+.close .icon{width:19px;height:19px}
+.player-title-row .meta-button{display:grid;place-items:center;padding:4px;border-radius:7px}
+.player-title-row .meta-button:hover{background:#262c29}
+.player-title-row .meta-button .icon{width:20px;height:20px}
+.queue-actions button{display:inline-flex;align-items:center;justify-content:center}
+.queue-actions .icon{width:15px;height:15px}
+.mv-bar button{display:grid;place-items:center}
+.mv-bar .icon{width:14px;height:14px}
+
+/* Player controls with icons */
+.player-controls button{height:30px;min-width:32px;padding:0 7px;display:inline-flex;align-items:center;justify-content:center}
+.player-controls button .icon{width:17px;height:17px}
+#togglePlay .icon-play,#togglePlay .icon-pause{fill:currentColor}
+#stopPlayback .icon{width:14px;height:14px;fill:currentColor}
+#back10 .icon,#forward10 .icon{width:20px;height:20px}
+#recordButton .icon{color:#ff8b82}
+#recordButton.recording{background:#b3261e}
+#recordButton.recording .icon{color:#fff;fill:#fff;animation:recording 1.4s ease-in-out infinite}
+@keyframes recording{50%{opacity:.35}}
+#filmstripButton.active{background:#b7ee7d;color:#16200e}
+.bitrate-label{display:inline-flex;align-items:center;gap:4px;margin-left:8px;padding:3px 7px;border-radius:6px;background:#151b18bd;color:#d9f5a8;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.bitrate-label .icon{width:12px;height:12px}
+.meta-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.bitrate-badge{display:inline-flex;align-items:center;gap:5px;margin-bottom:7px;padding:2px 8px;border-radius:20px;border:1px solid #3b4937;color:#c8f09e;font-size:10px;font-weight:700;letter-spacing:.02em;font-variant-numeric:tabular-nums;cursor:default}
+.bitrate-badge .icon{width:11px;height:11px}
+
+/* Auto-hidden controls in full screen and player mode */
+.player-controls{transition:opacity .25s}
+body.controls-idle .player-controls{opacity:0!important;pointer-events:none}
+body.controls-idle.native-fullscreen .video-wrap,body.controls-idle.player-mode .video-wrap{cursor:none}
+
+/* Seek preview */
+.player-controls{overflow:visible}
+.seek-preview{position:absolute;bottom:62px;transform:translateX(-50%);display:grid;justify-items:center;gap:5px;pointer-events:none;z-index:4}
+.seek-preview-image{width:168px;aspect-ratio:16/9;border-radius:7px;border:2px solid #fffd;background:#000 center/cover no-repeat;box-shadow:0 8px 24px #000b}
+.seek-preview span{background:#000c;color:#fff;border-radius:5px;padding:2px 7px;font-size:11px;font-weight:650;font-variant-numeric:tabular-nums}
+
+/* Filmstrip (« plan » de la vidéo) */
+.filmstrip{position:absolute;left:3%;right:3%;bottom:4%;z-index:4;display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:14px;background:#1c1f1ee6;border:1px solid #ffffff1f;box-shadow:0 14px 40px #000a;-webkit-backdrop-filter:blur(18px) saturate(1.4);backdrop-filter:blur(18px) saturate(1.4)}
+.video-wrap.filmstrip-open .player-controls{display:none}
+.filmstrip-play{flex:none;width:38px;height:38px;border:0;border-radius:9px;background:none;color:#f2f5f2}
+.filmstrip-play:hover{background:#ffffff14}
+.filmstrip-play .icon{width:22px;height:22px;fill:currentColor}
+.filmstrip-track{position:relative;flex:1;min-width:0;height:50px;border-radius:7px;outline:none;cursor:pointer;touch-action:none}
+.filmstrip-track:focus-visible{box-shadow:0 0 0 2px #b7ee7d}
+.filmstrip-frames{position:absolute;inset:0;display:flex;overflow:hidden;border-radius:7px;border:2px solid #d7dbd8;background:#0b0d0c}
+.filmstrip-frame{flex:1;min-width:0;background:#141716 center/cover no-repeat;border-right:1px solid #0008}
+.filmstrip-frame:last-child{border-right:0}
+.filmstrip-frame.loading{background-image:linear-gradient(100deg,#141716 30%,#222826 50%,#141716 70%);background-size:300% 100%;animation:frame-loading 1.3s linear infinite}
+.filmstrip-frame.missing{background:#141716}
+@keyframes frame-loading{from{background-position:100% 0}to{background-position:0 0}}
+.filmstrip-playhead{position:absolute;top:-5px;bottom:-5px;width:3px;margin-left:-1.5px;border-radius:2px;background:#fff;box-shadow:0 0 0 1px #0006,0 0 8px #0008;pointer-events:none}
+.filmstrip-hover{position:absolute;top:0;bottom:0;width:1px;background:#ffffffa0;pointer-events:none;opacity:0;transition:opacity .1s}
+.filmstrip-hover.visible{opacity:1}
+.filmstrip-time{position:absolute;bottom:calc(100% + 9px);left:0;transform:translateX(-50%);background:#000d;color:#fff;border-radius:5px;padding:2px 7px;font-size:11px;font-weight:650;white-space:nowrap;font-variant-numeric:tabular-nums}
+.filmstrip-done{flex:none;border:0;border-radius:8px;background:#b7ee7d;color:#16200e;font-weight:750;font-size:13px;padding:8px 14px}
+.filmstrip-done:hover{background:#c9fa9b}
+
+/* Sidebar playlists with actions */
+.playlist-item{display:flex;align-items:center;border-radius:9px}
+.playlist-item:hover{background:#232628}
+.playlist-item.active{background:#292f28}
+.playlist-nav .playlist-item button.playlist-name{flex:1;min-width:0;background:none}
+.playlist-item.active .playlist-name{color:#c9f59e}
+.playlist-nav .playlist-more{flex:none;width:28px;height:28px;padding:0;margin-right:4px;border-radius:7px;color:#8d978f;opacity:0;background:none}
+.playlist-item:hover .playlist-more,.playlist-more:focus-visible,.playlist-item.active .playlist-more{opacity:1}
+.playlist-nav .playlist-more:hover{background:#343b36;color:#fff}
+.playlist-more .icon{width:16px;height:16px}
+
+/* Pop-up menu */
+.popup-menu{position:fixed;z-index:12;min-width:196px;display:grid;gap:1px;padding:5px;border-radius:11px;background:#232829;border:1px solid #454d48;box-shadow:0 16px 44px #000b}
+.popup-item{justify-content:flex-start!important;width:100%;border:0;border-radius:7px;background:none;color:#e3eae3;padding:8px 10px;font-size:12px;text-align:left}
+.popup-item:hover,.popup-item:focus-visible{background:#2f3833;outline:none}
+.popup-item.danger{color:#ffaaa3}
+.popup-item .icon{width:15px;height:15px;opacity:.85}
+
+/* Drag and drop with zones */
+.drop-overlay{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;padding:40px;border-style:solid;border-color:#b7ee7d55;background:#0d110ef2}
+.drop-overlay>.drop-head{display:grid;gap:8px;padding:0}
+.drop-zones{display:flex;gap:16px;width:min(880px,100%)}
+.drop-zone{flex:1;display:grid;justify-items:center;align-content:center;gap:10px;min-height:190px;padding:24px 18px;border:2px dashed #4b5a47;border-radius:16px;color:#c9d6c5;transition:background .12s,border-color .12s,transform .12s}
+.drop-zone .icon{width:34px;height:34px;color:#b7ee7d;stroke-width:1.7}
+.drop-zone strong{font-size:17px;color:#eef5ea}
+.drop-zone span{font-size:12px;color:#9fb09a;line-height:1.45;max-width:220px}
+.drop-zone.active{background:#1f2c1d;border-color:#b7ee7d;border-style:solid;transform:scale(1.02)}
+.drop-overlay.single .drop-zones{width:min(420px,100%)}
+
+/* Wider modal, exports and converter */
+.modal.wide{width:min(620px,100%)}
+.check-list{display:grid;gap:0;margin-bottom:10px;max-height:260px;overflow:auto;border:1px solid #3a403c;border-radius:10px;padding:4px 12px}
+.check-list .check-field{margin:8px 0}
+.check-list .check-all{font-weight:700;border-bottom:1px solid #3a403c;padding-bottom:9px}
+.export-result{display:grid;gap:4px;margin-top:10px;font-size:12px;color:#c8f09e}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.field-row>.field[hidden]+.field,.field-row>.field:only-child{grid-column:1/-1}
+.field select optgroup{color:#9ea7a1;font-style:normal}
+.settings-heading.first{margin-top:4px}
+.convert-files{display:grid;gap:4px;margin-bottom:8px;max-height:180px;overflow:auto}
+.convert-files .muted{margin:0 0 6px}
+.convert-file{display:flex;align-items:center;gap:9px;padding:6px 4px 6px 10px;border-radius:8px;background:#282d2b;font-size:12px}
+.convert-file>.icon{width:15px;height:15px;color:#b7ee7d}
+.convert-file span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.convert-destination{margin:4px 0 10px}
+.convert-jobs-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px}
+.convert-jobs-head .settings-heading{margin:10px 0 6px}
+.subtle.small{padding:5px 10px;font-size:11px}
+.convert-jobs{display:grid;gap:6px}
+.convert-job{display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:10px;background:#262b29;border:1px solid #343b37}
+.convert-job-main{flex:1;min-width:0;display:grid;gap:4px}
+.convert-job-main strong{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.convert-job-main small{font-size:11px;color:#9ba69e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.convert-job.done .convert-status{color:#b7ee7d}
+.convert-job.failed .convert-status{color:#f3a8a2;white-space:normal}
+.convert-job.cancelled{opacity:.65}
+.progress-bar{height:5px;border-radius:3px;background:#3a423c;overflow:hidden}
+.progress-bar span{display:block;height:100%;border-radius:3px;background:#b7ee7d;transition:width .4s}
+.progress-bar.indeterminate span{width:35%!important;animation:progress-slide 1.2s ease-in-out infinite}
+@keyframes progress-slide{from{transform:translateX(-100%)}to{transform:translateX(290%)}}
+
+/* Search field and filter row */
+.search-wrap,.filters-wrap,.group-filters{flex:none}
+.search-wrap .channel-count{flex:none;line-height:1.2;color:#7b847e;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.group-picker{min-width:120px}
+
+/* Controls adapt to the width of the player: secondary items give way first. The bitrate stays
+   under the video, the 10-second jumps stay on ← →, the volume on the sound button. */
+.video-wrap{container-type:inline-size;container-name:player}
+.controls-row{min-width:0}
+@container player (max-width:720px){.bitrate-label{display:none}}
+@container player (max-width:600px){#back10,#forward10,#volume{display:none}.controls-row{gap:3px}.player-controls button{min-width:28px;padding:0 5px}}
+@container player (max-width:430px){#pip,#airplay{display:none}#timeLabel{font-size:10px}}
+/* In full screen, messages appear at the top so they never cover the controls or the filmstrip. */
+.native-fullscreen #toast{top:18px;bottom:auto;right:50%;transform:translate(50%,-8px)}
+.native-fullscreen #toast.show{transform:translate(50%,0)}

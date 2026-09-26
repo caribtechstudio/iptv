@@ -41,6 +41,8 @@ pub struct Session {
     kind: Kind,
     last_access: Mutex<Instant>,
     errors: Mutex<VecDeque<String>>,
+    /// Media bytes sent to the player: the page derives the bitrate from it.
+    bytes: AtomicU64,
 }
 
 impl Session {
@@ -76,6 +78,7 @@ pub struct SessionStatus {
     pub alive: bool,
     pub errors: Vec<String>,
     pub failure: Option<String>,
+    pub bytes: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -211,10 +214,40 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8],
     }
 }
 
-fn serve_file(stream: &mut TcpStream, path: &std::path::Path, content_type: &str, head_only: bool) {
+/// Serves a file and returns the number of body bytes sent.
+fn serve_file(
+    stream: &mut TcpStream,
+    path: &std::path::Path,
+    content_type: &str,
+    head_only: bool,
+) -> u64 {
     match fs::read(path) {
-        Ok(bytes) => respond(stream, 200, content_type, &bytes, head_only),
-        Err(_) => respond(stream, 404, "text/plain", b"", head_only),
+        Ok(bytes) => {
+            respond(stream, 200, content_type, &bytes, head_only);
+            if head_only { 0 } else { bytes.len() as u64 }
+        }
+        Err(_) => {
+            respond(stream, 404, "text/plain", b"", head_only);
+            0
+        }
+    }
+}
+
+/// Counts what goes through a writer.
+struct Counting<'a, W: Write> {
+    inner: &'a mut W,
+    count: &'a AtomicU64,
+}
+
+impl<W: Write> Write for Counting<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.count.fetch_add(written as u64, Ordering::Relaxed);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -277,6 +310,7 @@ impl Proxy {
             kind,
             last_access: Mutex::new(Instant::now()),
             errors: Mutex::new(VecDeque::new()),
+            bytes: AtomicU64::new(0),
         });
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.insert(id.clone(), session);
@@ -340,6 +374,18 @@ impl Proxy {
         }
     }
 
+    /// Stops every session (FFmpeg conversions, MPEG-TS readers) when the app quits.
+    pub fn close_all(&self) {
+        let sessions: Vec<Arc<Session>> = self
+            .sessions
+            .lock()
+            .map(|mut sessions| sessions.drain().map(|(_, session)| session).collect())
+            .unwrap_or_default();
+        for session in sessions {
+            session.shutdown();
+        }
+    }
+
     pub fn status(&self, id: &str) -> SessionStatus {
         let session = self
             .sessions
@@ -359,11 +405,13 @@ impl Proxy {
                     Kind::Segmenter(segmenter) => segmenter.error(),
                     Kind::Transcode(job) => job.failure(),
                 },
+                bytes: session.bytes.load(Ordering::Relaxed),
             },
             None => SessionStatus {
                 alive: false,
                 errors: Vec::new(),
                 failure: None,
+                bytes: 0,
             },
         }
     }
@@ -464,7 +512,10 @@ impl Proxy {
                     .ok()
                     .and_then(|n| segmenter.segment(n))
                 {
-                    Some(path) => serve_file(&mut stream, &path, "video/mp2t", head_only),
+                    Some(path) => {
+                        let sent = serve_file(&mut stream, &path, "video/mp2t", head_only);
+                        session.bytes.fetch_add(sent, Ordering::Relaxed);
+                    }
                     None => respond(&mut stream, 404, "text/plain", b"", head_only),
                 }
             }
@@ -487,7 +538,8 @@ impl Proxy {
                 if let Some(error) = job.failure() {
                     session.record(error);
                 }
-                serve_file(&mut stream, &job.dir().join(name), content_type, head_only)
+                let sent = serve_file(&mut stream, &job.dir().join(name), content_type, head_only);
+                session.bytes.fetch_add(sent, Ordering::Relaxed);
             }
             _ => respond(&mut stream, 404, "text/plain", b"", head_only),
         }
@@ -594,7 +646,13 @@ impl Proxy {
         if write_head(stream, &reply).is_err() || head_only {
             return;
         }
-        let _ = std::io::copy(&mut reader, stream);
+        let _ = std::io::copy(
+            &mut reader,
+            &mut Counting {
+                inner: stream,
+                count: &session.bytes,
+            },
+        );
     }
 }
 

@@ -2,6 +2,7 @@
 
 import { Player } from './playback.js';
 import { MpvMedia } from './mpv-media.js';
+import { iconButton } from './icons.js';
 
 export const MAX_CELLS = 4;
 
@@ -54,10 +55,8 @@ export function createMultiview(root, { deps, alternatives, onPromote, toast, li
     const status = document.createElement('span');
     status.className = 'mv-status';
     status.textContent = 'Chargement…';
-    const promote = document.createElement('button');
-    promote.textContent = '⤢'; promote.title = 'Regarder en grand';
-    const close = document.createElement('button');
-    close.textContent = '×'; close.title = 'Retirer';
+    const promote = iconButton('player-mode', 'Regarder en grand');
+    const close = iconButton('x', 'Retirer');
     bar.append(title, status, promote, close);
     element.append(video, bar);
     grid.append(element);
@@ -78,7 +77,7 @@ export function createMultiview(root, { deps, alternatives, onPromote, toast, li
     }, { watchdog: true, mpv });
     const cell = { channel, element, video, player, mpv, slot };
     cells.push(cell);
-    element.onclick = (event) => { if (event.target === close || event.target === promote) return; focus(cells.indexOf(cell)); };
+    element.onclick = (event) => { if (close.contains(event.target) || promote.contains(event.target)) return; focus(cells.indexOf(cell)); };
     close.onclick = () => remove(cell);
     promote.onclick = () => onPromote(channel);
     if (active < 0) active = cells.length - 1;

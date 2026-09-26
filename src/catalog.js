@@ -19,11 +19,22 @@ export function normalizeChannelName(name = '') {
 
 export function baseTvgId(id = '') { return String(id).split('@')[0].trim().toLowerCase(); }
 
-/** Key grouping the sources of one channel: guide id without feed, otherwise its name. */
-export function channelKey(channel) {
-  const id = channel.tvgId && baseTvgId(channel.tvgId);
-  return id ? `id:${id}` : `name:${normalizeChannelName(channel.name)}`;
+// Keys are computed once per channel object: zapping compares the channel with the whole
+// catalogue, and normalising 100 000 names at every change of channel took a quarter second.
+const keyCache = new WeakMap();
+function keysOf(channel) {
+  let keys = keyCache.get(channel);
+  if (!keys) {
+    const name = `name:${normalizeChannelName(channel.name)}`;
+    const id = channel.tvgId && baseTvgId(channel.tvgId);
+    keys = { key: id ? `id:${id}` : name, name };
+    keyCache.set(channel, keys);
+  }
+  return keys;
 }
+
+/** Key grouping the sources of one channel: guide id without feed, otherwise its name. */
+export function channelKey(channel) { return keysOf(channel).key; }
 
 export function dedupeByUrl(channels) {
   const seen = new Set();
@@ -48,11 +59,12 @@ function healthRank(health, url) {
 /** The channel first, then the other sources of the same channel, healthy and sharp first. */
 export function alternativesFor(channel, channels, health = {}, limit = 6) {
   if (channel.kind && channel.kind !== 'live') return [channel];
-  const key = channelKey(channel);
-  const nameKey = `name:${normalizeChannelName(channel.name)}`;
-  const others = channels.filter((item) => item.streamUrl !== channel.streamUrl
-    && (!item.kind || item.kind === 'live')
-    && (channelKey(item) === key || `name:${normalizeChannelName(item.name)}` === nameKey));
+  const { key, name } = keysOf(channel);
+  const others = channels.filter((item) => {
+    if (item.streamUrl === channel.streamUrl || (item.kind && item.kind !== 'live')) return false;
+    const keys = keysOf(item);
+    return keys.key === key || keys.name === name;
+  });
   others.sort((a, b) => healthRank(health, a.streamUrl) - healthRank(health, b.streamUrl)
     || resolutionOf(b.name) - resolutionOf(a.name));
   return [channel, ...dedupeByUrl(others)].slice(0, limit);

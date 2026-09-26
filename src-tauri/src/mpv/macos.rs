@@ -449,6 +449,9 @@ pub struct Frame {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    /// Height of the page's viewport. When the web view extends under the title bar, WebKit
+    /// moves the page down by the difference, which page coordinates do not include.
+    pub viewport_height: Option<f64>,
 }
 
 /// A native view showing one mpv instance. Main thread only.
@@ -516,8 +519,14 @@ impl Surface {
         let Some(parent) = (unsafe { self.view.superview() }) else {
             return;
         };
+        let visible: NSRect = unsafe { msg_send![&*self.reference, bounds] };
+        let inset = frame
+            .viewport_height
+            .map(|viewport| visible.size.height - viewport)
+            .filter(|inset| (0.5..120.0).contains(inset))
+            .unwrap_or(0.0);
         let rect = NSRect::new(
-            NSPoint::new(frame.x, frame.y),
+            NSPoint::new(frame.x, frame.y + inset),
             NSSize::new(frame.width, frame.height),
         );
         // Handles the web view being flipped (top-left origin) while its parent is not.

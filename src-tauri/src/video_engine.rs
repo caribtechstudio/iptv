@@ -42,11 +42,15 @@ const OBSERVED: &[(&str, Format)] = &[
 const TIME_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Bounds {
     pub x: f64,
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    /// `window.innerHeight` of the page, used to find the title bar inset on macOS.
+    #[serde(default)]
+    pub viewport_height: Option<f64>,
 }
 
 impl Bounds {
@@ -119,6 +123,17 @@ fn trace(message: impl FnOnce() -> String) {
     if *ENABLED.get_or_init(|| std::env::var_os("FLUXO_MPV_SAMPLE").is_some()) {
         eprintln!("[mpv] {}", message());
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stats {
+    /// Bytes per second read from the network into the cache.
+    pub cache_speed: Option<f64>,
+    /// Bits per second of the video and audio packets being decoded.
+    pub video_bitrate: Option<f64>,
+    pub audio_bitrate: Option<f64>,
+    pub dropped_frames: Option<f64>,
 }
 
 #[derive(Default)]
@@ -364,6 +379,22 @@ impl VideoEngine {
         self.get(surface)?.mpv.set_property(name, value)
     }
 
+    /// Network and stream bitrates, polled by the page about once a second.
+    pub fn stats(&self, surface: &str) -> Result<Stats, String> {
+        let instance = self.get(surface)?;
+        let mpv = &instance.mpv;
+        let positive = |name: &str| {
+            mpv.get_double(name)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+        };
+        Ok(Stats {
+            cache_speed: positive("cache-speed"),
+            video_bitrate: positive("video-bitrate"),
+            audio_bitrate: positive("audio-bitrate"),
+            dropped_frames: positive("frame-drop-count"),
+        })
+    }
+
     pub fn get_property(&self, surface: &str, name: &str) -> Result<Option<String>, String> {
         Ok(self.get(surface)?.mpv.get_string(name))
     }
@@ -519,6 +550,7 @@ mod platform {
                         y: b.y,
                         width: b.width,
                         height: b.height,
+                        viewport_height: b.viewport_height,
                     }));
                 }
             });
@@ -576,7 +608,8 @@ mod tests {
                 x: 0.0,
                 y: 0.0,
                 width: 640.0,
-                height: 360.0
+                height: 360.0,
+                viewport_height: Some(728.0),
             }
             .valid()
         );
@@ -585,7 +618,8 @@ mod tests {
                 x: f64::NAN,
                 y: 0.0,
                 width: 640.0,
-                height: 360.0
+                height: 360.0,
+                viewport_height: Some(728.0),
             }
             .valid()
         );

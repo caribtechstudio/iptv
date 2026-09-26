@@ -63,6 +63,7 @@ fn main() {
         y: 60.0,
         width: 640.0,
         height: 360.0,
+        viewport_height: None,
     }));
     let surface: &'static Surface = Box::leak(Box::new(surface));
     let stats = surface.stats() as *const fluxo_lib::mpv::macos::Stats as usize;

@@ -1,6 +1,6 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import { readText } from '@tauri-apps/plugin-clipboard-manager';
 import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -12,37 +12,41 @@ import { ENGINE_PREFERENCES, MODE_LABELS, Player, engineOf } from './playback.js
 import { MpvMedia } from './mpv-media.js';
 import { gridWindow, renderGuideGrid } from './guide-grid.js';
 import { createMultiview } from './multiview.js';
+import { hydrateIcons, icon, iconButton, setIcon } from './icons.js';
+import { RateMeter, formatBitrate, formatBytes } from './bitrate.js';
+import { createFilmstrip } from './filmstrip.js';
 import './style.css';
 
 const app = document.querySelector('#app');
 app.innerHTML = `
   <div class="shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-icon">▶</span><span>Fluxo</span></div>
+      <div class="brand"><span class="brand-icon"><i data-icon="play"></i></span><span>Fluxo</span></div>
       <nav class="main-nav" aria-label="Navigation">
-        <button data-view="all" class="active"><span class="nav-icon">▦</span> Toutes les chaînes</button>
-        <button data-view="guide"><span class="nav-icon">☷</span> Guide TV</button>
-        <button data-view="favorites"><span class="nav-icon">☆</span> Favoris</button>
-        <button data-view="recent"><span class="nav-icon">◷</span> Récents</button>
-        <button data-view="continue"><span class="nav-icon">↻</span> Reprendre</button>
+        <button data-view="all" class="active"><i data-icon="grid" class="nav-icon"></i> Toutes les chaînes</button>
+        <button data-view="guide"><i data-icon="guide" class="nav-icon"></i> Guide TV</button>
+        <button data-view="favorites"><i data-icon="star" class="nav-icon"></i> Favoris</button>
+        <button data-view="recent"><i data-icon="history" class="nav-icon"></i> Récents</button>
+        <button data-view="continue"><i data-icon="play-circle" class="nav-icon"></i> Reprendre</button>
       </nav>
-      <div class="sidebar-heading"><span>PLAYLISTS</span><button id="addPlaylistShortcut" title="Ajouter une playlist" aria-label="Ajouter une playlist">＋</button></div>
+      <div class="sidebar-heading"><span>PLAYLISTS</span><button id="addPlaylistShortcut" title="Ajouter une playlist" aria-label="Ajouter une playlist"><i data-icon="plus"></i></button></div>
       <div id="playlistNav" class="playlist-nav"></div>
-      <div class="sidebar-bottom"><button id="recordingsButton">⏺ <span>Enregistrements</span></button><button id="settingsButton">⚙ <span>Sources & guide TV</span></button></div>
+      <div class="sidebar-bottom"><button id="recordingsButton"><i data-icon="record"></i><span>Enregistrements</span></button><button id="converterButton"><i data-icon="convert"></i><span>Convertisseur</span><span id="converterBadge" class="sidebar-badge" hidden></span></button><button id="settingsButton"><i data-icon="settings"></i><span>Sources & guide TV</span></button></div>
     </aside>
     <main class="main">
-      <header class="topbar"><div><div class="eyebrow">VOTRE LECTEUR</div><div class="title-row"><h1 id="viewTitle">Toutes les chaînes</h1><button id="renameView" class="title-edit" title="Renommer la playlist" aria-label="Renommer la playlist" hidden>✎</button></div></div><div class="top-actions"><button id="multiviewMode" class="subtle" title="Regarder jusqu’à 4 chaînes à la fois">Multivue</button><button id="playerMode" class="subtle" title="Agrandir le lecteur">Mode lecteur</button><button id="openMedia" class="subtle">Ouvrir des médias</button><button id="playUrl" class="primary">＋ Lire une URL</button></div></header>
+      <header class="topbar"><div><div class="eyebrow">VOTRE LECTEUR</div><div class="title-row"><h1 id="viewTitle">Toutes les chaînes</h1><button id="renameView" class="title-edit" title="Renommer la playlist" aria-label="Renommer la playlist" hidden><i data-icon="edit"></i></button><button id="exportView" class="title-edit" title="Exporter la playlist en M3U" aria-label="Exporter la playlist en M3U" hidden><i data-icon="download"></i></button></div></div><div class="top-actions"><button id="multiviewMode" class="subtle" title="Regarder jusqu’à 4 chaînes à la fois"><i data-icon="multiview"></i><span>Multivue</span></button><button id="playerMode" class="subtle" title="Agrandir le lecteur"><i data-icon="player-mode"></i><span>Mode lecteur</span></button><button id="openMedia" class="subtle"><i data-icon="folder-open"></i><span>Ouvrir des médias</span></button><button id="playUrl" class="primary"><i data-icon="link"></i><span>Lire une URL</span></button></div></header>
       <div class="content">
-        <section class="catalogue"><div class="search-wrap"><span>⌕</span><input id="search" type="search" placeholder="Rechercher une chaîne ou un groupe…" aria-label="Rechercher"></div><div class="filters-wrap"><div class="filters"><button id="groupPicker" class="group-picker" aria-haspopup="listbox" aria-expanded="false" aria-controls="groupPanel"><span id="groupPickerLabel" class="group-picker-label">Catégories</span><span id="groupPickerCount" class="group-picker-count"></span><span class="group-picker-chevron" aria-hidden="true">▾</span></button><button id="groupClear" class="group-clear" title="Afficher toutes les catégories" aria-label="Afficher toutes les catégories" hidden>×</button><button id="filtersButton" class="filter-button" title="Pays, langue, groupes masqués, chaînes hors ligne">Filtres</button><button id="checkButton" class="filter-button" title="Vérifier la disponibilité des chaînes affichées">Vérifier</button><span id="channelCount"></span></div><div id="groupPanel" class="group-panel" hidden><div class="group-panel-head"><input id="groupSearch" type="search" placeholder="Rechercher une catégorie…" aria-label="Rechercher une catégorie" autocomplete="off"><div class="group-sort" role="group" aria-label="Ordre des catégories"><button data-sort="list" title="Ordre de la playlist">Liste</button><button data-sort="az" title="Ordre alphabétique">A–Z</button><button data-sort="count" title="Les plus grandes d’abord">Taille</button></div></div><div id="groupList" class="group-list-panel" role="listbox" aria-label="Catégories"></div><p class="group-panel-hint">↑ ↓ pour naviguer · Entrée pour choisir · 📌 pour épingler en raccourci</p></div></div><div id="groupFilters" class="group-filters" hidden></div><div id="channels" class="channels"></div><div id="guideGrid" class="guide-grid" hidden></div></section>
-        <section class="player-pane"><div class="player-card"><div class="video-wrap" id="videoWrap"><video id="video" playsinline preload="metadata" x-webkit-airplay="allow"></video><div id="subtitleOverlay" class="subtitle-overlay" aria-live="off"></div><div id="zapOverlay" class="zap-overlay" hidden></div><div id="videoEmpty" class="video-empty"><div class="empty-glyph">▶</div><strong>Prêt à regarder</strong><span>Choisissez une chaîne ou glissez des vidéos ici.</span></div><div class="player-controls" id="playerControls"><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Position de lecture"><div class="controls-row"><button id="togglePlay" title="Lecture / pause" aria-label="Lecture / pause">▶</button><button id="back10" title="Reculer de 10 secondes" aria-label="Reculer de 10 secondes">−10</button><button id="forward10" title="Avancer de 10 secondes" aria-label="Avancer de 10 secondes">+10</button><span id="timeLabel">00:00 / 00:00</span><div class="controls-spacer"></div><button id="mute" title="Couper le son (M)" aria-label="Couper le son">◖))</button><input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume"><button id="subtitleOptions" title="Gérer les sous-titres" aria-label="Gérer les sous-titres" aria-haspopup="dialog">CC</button><button id="qualityOptions" title="Qualité vidéo" aria-label="Qualité vidéo" aria-haspopup="dialog" hidden>Auto</button><button id="recordButton" title="Enregistrer ce direct" aria-label="Enregistrer">⏺</button><button id="airplay" title="AirPlay" aria-label="AirPlay" hidden>⎚</button><button id="playerOptions" title="Options du lecteur" aria-label="Options du lecteur">⚙</button><button id="pip" title="Image dans l’image" aria-label="Image dans l’image">▣</button><button id="fullscreen" title="Plein écran (F)" aria-label="Plein écran">⛶</button></div></div></div><div class="player-meta"><div class="meta-top"><div class="live-indicator" id="liveIndicator">LECTEUR</div><span id="engineBadge" class="engine-badge" hidden></span></div><div class="player-title-row"><h2 id="playingTitle">Aucune lecture</h2><button id="streamInfo" class="meta-button" title="Informations sur le flux (I)" aria-label="Informations sur le flux" hidden>ⓘ</button><button id="favoriteButton" class="meta-button" title="Ajouter aux favoris" aria-label="Ajouter aux favoris" hidden>☆</button></div><p id="playingDetail">La vidéo et l’audio se lisent ici.</p><p id="playerStatus" class="player-status" aria-live="polite"></p><p id="playerError" role="alert"></p></div></div><div id="queueCard" class="queue-card" hidden><div class="queue-head"><div><h3>À suivre</h3><span id="queueCount"></span></div><div class="queue-actions"><button id="queuePrevious" aria-label="Média précédent" title="Média précédent">←</button><button id="queueNext" aria-label="Média suivant" title="Média suivant">→</button><button id="queueClear" title="Effacer la file">Effacer</button></div></div><div id="queueItems" class="queue-items"></div></div><div class="guide-card"><div class="guide-header"><h3>Programme TV</h3><span id="guideStatus">Ajoutez un guide XMLTV</span></div><div id="programs" class="programs"><p class="muted">Sélectionnez une chaîne pour voir son programme.</p></div></div></section>
+        <section class="catalogue"><div class="search-wrap"><i data-icon="search"></i><input id="search" type="search" placeholder="Rechercher une chaîne ou un groupe…" aria-label="Rechercher"><span id="channelCount" class="channel-count" aria-live="polite"></span></div><div class="filters-wrap"><div class="filters"><button id="groupPicker" class="group-picker" aria-haspopup="listbox" aria-expanded="false" aria-controls="groupPanel"><span id="groupPickerLabel" class="group-picker-label">Catégories</span><span id="groupPickerCount" class="group-picker-count"></span><i data-icon="chevron-down" class="group-picker-chevron"></i></button><button id="groupClear" class="group-clear" title="Afficher toutes les catégories" aria-label="Afficher toutes les catégories" hidden><i data-icon="x"></i></button><button id="filtersButton" class="filter-button" title="Pays, langue, groupes masqués, chaînes hors ligne"><i data-icon="filters"></i><span>Filtres</span></button><button id="checkButton" class="filter-button" title="Vérifier la disponibilité des chaînes affichées"><i data-icon="list-checks"></i><span>Vérifier</span></button></div><div id="groupPanel" class="group-panel" hidden><div class="group-panel-head"><input id="groupSearch" type="search" placeholder="Rechercher une catégorie…" aria-label="Rechercher une catégorie" autocomplete="off"><div class="group-sort" role="group" aria-label="Ordre des catégories"><button data-sort="list" title="Ordre de la playlist">Liste</button><button data-sort="az" title="Ordre alphabétique">A–Z</button><button data-sort="count" title="Les plus grandes d’abord">Taille</button></div></div><div id="groupList" class="group-list-panel" role="listbox" aria-label="Catégories"></div><p class="group-panel-hint">↑ ↓ pour naviguer · Entrée pour choisir · épingle pour garder en raccourci</p></div></div><div id="groupFilters" class="group-filters" hidden></div><div id="channels" class="channels"></div><div id="guideGrid" class="guide-grid" hidden></div></section>
+        <section class="player-pane"><div class="player-card"><div class="video-wrap" id="videoWrap"><video id="video" playsinline preload="metadata" x-webkit-airplay="allow"></video><div id="subtitleOverlay" class="subtitle-overlay" aria-live="off"></div><div id="zapOverlay" class="zap-overlay" hidden></div><div id="videoEmpty" class="video-empty"><div class="empty-glyph"><i data-icon="play"></i></div><strong>Prêt à regarder</strong><span>Choisissez une chaîne ou glissez des vidéos ici.</span></div><div class="player-controls" id="playerControls"><div id="seekPreview" class="seek-preview" hidden><div class="seek-preview-image"></div><span></span></div><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Position de lecture"><div class="controls-row"><button id="togglePlay" title="Lecture / pause (Espace)" aria-label="Lecture / pause"><i data-icon="play"></i></button><button id="stopPlayback" title="Arrêter la lecture (S)" aria-label="Arrêter la lecture"><i data-icon="stop"></i></button><button id="back10" title="Reculer de 10 secondes (←)" aria-label="Reculer de 10 secondes"><i data-icon="back10"></i></button><button id="forward10" title="Avancer de 10 secondes (→)" aria-label="Avancer de 10 secondes"><i data-icon="forward10"></i></button><span id="timeLabel">00:00 / 00:00</span><span id="bitrateLabel" class="bitrate-label" hidden><i data-icon="activity"></i><span></span></span><div class="controls-spacer"></div><button id="mute" title="Couper le son (M)" aria-label="Couper le son"><i data-icon="volume-high"></i></button><input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume"><button id="filmstripButton" title="Plan de la vidéo (P)" aria-label="Afficher le plan de la vidéo" aria-pressed="false" hidden><i data-icon="film"></i></button><button id="subtitleOptions" title="Gérer les sous-titres" aria-label="Gérer les sous-titres" aria-haspopup="dialog"><i data-icon="captions"></i></button><button id="qualityOptions" title="Qualité vidéo" aria-label="Qualité vidéo" aria-haspopup="dialog" hidden>Auto</button><button id="recordButton" title="Enregistrer ce direct" aria-label="Enregistrer"><i data-icon="record"></i></button><button id="airplay" title="AirPlay" aria-label="AirPlay" hidden><i data-icon="airplay"></i></button><button id="playerOptions" title="Options du lecteur" aria-label="Options du lecteur"><i data-icon="settings"></i></button><button id="pip" title="Image dans l’image" aria-label="Image dans l’image"><i data-icon="pip"></i></button><button id="fullscreen" title="Plein écran (F)" aria-label="Plein écran"><i data-icon="fullscreen"></i></button></div></div></div><div class="player-meta"><div class="meta-top"><div class="live-indicator" id="liveIndicator">LECTEUR</div><span id="engineBadge" class="engine-badge" hidden></span><span id="bitrateBadge" class="bitrate-badge" hidden><i data-icon="activity"></i><span></span></span></div><div class="player-title-row"><h2 id="playingTitle">Aucune lecture</h2><button id="streamInfo" class="meta-button" title="Informations sur le flux (I)" aria-label="Informations sur le flux" hidden><i data-icon="info"></i></button><button id="favoriteButton" class="meta-button" title="Ajouter aux favoris" aria-label="Ajouter aux favoris" hidden><i data-icon="star"></i></button></div><p id="playingDetail">La vidéo et l’audio se lisent ici.</p><p id="playerStatus" class="player-status" aria-live="polite"></p><p id="playerError" role="alert"></p></div></div><div id="queueCard" class="queue-card" hidden><div class="queue-head"><div><h3>À suivre</h3><span id="queueCount"></span></div><div class="queue-actions"><button id="queuePrevious" aria-label="Média précédent" title="Média précédent"><i data-icon="chevron-left"></i></button><button id="queueNext" aria-label="Média suivant" title="Média suivant"><i data-icon="chevron-right"></i></button><button id="queueClear" title="Effacer la file">Effacer</button></div></div><div id="queueItems" class="queue-items"></div></div><div class="guide-card"><div class="guide-header"><h3>Programme TV</h3><span id="guideStatus">Ajoutez un guide XMLTV</span></div><div id="programs" class="programs"><p class="muted">Sélectionnez une chaîne pour voir son programme.</p></div></div></section>
         <section id="multiview" class="multiview" hidden></section>
       </div>
     </main>
   </div>
-  <div id="dropOverlay" class="drop-overlay" hidden><div><strong>Déposez vos médias</strong><span>Vidéos, fichiers audio ou dossier de vidéos</span></div></div>
-  <div id="modal" class="modal-backdrop" hidden><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-head"><h2 id="modalTitle"></h2><button id="modalClose" class="close" aria-label="Fermer">×</button></div><div id="modalBody"></div></div></div>
+  <div id="dropOverlay" class="drop-overlay" hidden><div class="drop-head"><strong id="dropTitle">Déposez vos médias</strong><span id="dropDetail">Vidéos, fichiers audio ou dossiers</span></div><div class="drop-zones"><div class="drop-zone" data-action="play"><i data-icon="play-circle"></i><strong>Lire maintenant</strong><span>Ajoutés aux médias locaux, le premier démarre et les suivants s’enchaînent</span></div><div class="drop-zone" data-action="queue"><i data-icon="list-plus"></i><strong>Ajouter à la suite</strong><span>Après le média en cours, sans l’interrompre</span></div><div class="drop-zone" data-action="convert"><i data-icon="convert"></i><strong>Convertir</strong><span>Dans un autre format vidéo ou audio</span></div></div></div>
+  <div id="modal" class="modal-backdrop" hidden><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-head"><h2 id="modalTitle"></h2><button id="modalClose" class="close" aria-label="Fermer" title="Fermer"><i data-icon="x"></i></button></div><div id="modalBody"></div></div></div>
   <div id="updateBanner" class="update-banner" role="status" aria-live="polite" hidden><div><strong id="updateTitle"></strong><span id="updateDetail"></span></div><button id="updateInstall" class="primary">Installer et redémarrer</button><button id="updateLater" class="subtle">Plus tard</button></div>
   <div id="toast" role="status" aria-live="polite"></div>`;
+hydrateIcons(app);
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -94,6 +98,8 @@ function toast(message, kind = '') {
 function errorMessage(error) { return typeof error === 'string' ? error : error?.message || String(error); }
 function make(tag, className, text) { const el = document.createElement(tag); if (className) el.className = className; if (text !== undefined) el.textContent = text; return el; }
 function button(text, className, action) { const el = make('button', className, text); el.onclick = action; return el; }
+function withIcon(el, name) { el.classList.add('with-icon'); el.prepend(icon(name)); return el; }
+function emptyIcon(name) { const el = make('div', 'empty-icon'); el.append(icon(name)); return el; }
 function clock(seconds) { return new Date(seconds * 1000).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }); }
 function timeText(value) {
   if (!Number.isFinite(value)) return '00:00';
@@ -159,6 +165,7 @@ const player = new Player(video, playerDeps, {
     return true;
   },
   onSource: (ctx) => {
+    filmstrip.close();
     const channel = ctx.channel;
     state.playing = { url: channel.streamUrl, name: channel.name, channelId: channel.id.startsWith('recent|') || channel.id.startsWith('progress|') ? null : channel.id, tvgId: channel.tvgId, channel, catchup: ctx.catchup || null, kind: channel.kind };
     $('playingTitle').textContent = ctx.catchup ? `${channel.name} · ${ctx.catchup.title}` : channel.name;
@@ -214,6 +221,27 @@ const player = new Player(video, playerDeps, {
 for (const type of ['emptied', 'loadstart']) {
   mainMpv.addEventListener(type, () => $('videoWrap').classList.toggle('mpv-active', Boolean(mainMpv.getAttribute('src'))));
 }
+
+/** The video being played, when FFmpeg can take pictures of it (films, episodes, files). */
+function filmstripSource() {
+  const ctx = player.info;
+  const url = String(ctx?.url || '');
+  if (!url || ctx.live || !state.engine.ffmpeg || !player.media.getAttribute('src')) return null;
+  const local = url.startsWith('file:') || url.startsWith('/');
+  if (!local && !/^https?:\/\//i.test(url)) return null;
+  return { source: url, headers: ctx.headers || {}, local };
+}
+const filmstrip = createFilmstrip($('videoWrap'), {
+  invoke, listen, timeText,
+  media: () => player.media,
+  source: filmstripSource,
+  onError: () => toast('Impossible de prendre des images de cette vidéo : le serveur ne permet peut-être pas de s’y déplacer.', 'error'),
+  onToggle: (open) => {
+    $('filmstripButton').classList.toggle('active', open);
+    $('filmstripButton').setAttribute('aria-pressed', String(open));
+    wakeControls();
+  },
+});
 
 function youtubeBounds() {
   if (!$('modal').hidden || !$('dropOverlay').hidden || document.body.classList.contains('multiview-mode')) return null;
@@ -328,24 +356,115 @@ function showQualityOptions() {
   });
 }
 
+// ---------- Débit ----------
+// Sampled every second: mpv gives its network speed, the local relay counts the bytes it
+// serves, and WebKit the bytes it decodes. Without any of them, the rate announced by the
+// chosen HLS variant is shown as an estimate.
+
+const BITRATE_SOURCES = {
+  network: 'Débit réseau',
+  stream: 'Débit du fichier lu',
+  decoded: 'Débit reçu par le lecteur',
+  converted: 'Débit après conversion FFmpeg',
+  declared: 'Débit annoncé par la source',
+};
+const bitrate = { meter: new RateMeter(), key: '', busy: false, source: '', detail: null, declared: 0 };
+/** The rate to show and where it comes from. When a film is fully buffered the network rests:
+ * the bitrate of the stream being decoded is shown instead. */
+function shownBitrate() {
+  const measured = bitrate.meter.bitsPerSecond;
+  if (Number.isFinite(measured) && measured > 0) return { value: measured, source: bitrate.source };
+  const stream = (bitrate.detail?.video || 0) + (bitrate.detail?.audio || 0);
+  if (stream > 0) return { value: stream, source: 'stream' };
+  if (bitrate.source === 'declared' && bitrate.declared) return { value: bitrate.declared, source: 'declared' };
+  return null;
+}
+function bitrateTitle(source) {
+  const lines = [`${BITRATE_SOURCES[source] || 'Débit'}${source === 'declared' ? '' : ' · moyenne sur quelques secondes'}`];
+  if (source === 'stream' && bitrate.source === 'network') lines.push('Le cache est plein : le réseau est au repos.');
+  if (bitrate.detail?.video) lines.push(`Vidéo : ${formatBitrate(bitrate.detail.video)}`);
+  if (bitrate.detail?.audio) lines.push(`Audio : ${formatBitrate(bitrate.detail.audio)}`);
+  if (bitrate.meter.total > 0) lines.push(`Données reçues : ${formatBytes(bitrate.meter.total)}`);
+  return lines.join('\n');
+}
+function renderBitrate() {
+  const shown = shownBitrate();
+  const show = Boolean(bitrate.key) && Boolean(shown);
+  const source = shown?.source;
+  const text = show ? `${source === 'declared' ? '≈ ' : ''}${formatBitrate(shown.value)}` : '';
+  const title = show ? bitrateTitle(source) : '';
+  for (const id of ['bitrateLabel', 'bitrateBadge']) {
+    const el = $(id);
+    el.hidden = !show;
+    if (!show) continue;
+    el.lastChild.textContent = text;
+    el.title = title;
+    el.setAttribute('aria-label', `${BITRATE_SOURCES[source] || 'Débit'} : ${text}`);
+  }
+}
+async function sampleBitrate() {
+  const ctx = player.info;
+  const current = media();
+  if (!ctx?.plan || !current.getAttribute('src') || document.body.classList.contains('multiview-mode')) {
+    if (bitrate.key) { bitrate.key = ''; bitrate.meter.reset(); renderBitrate(); }
+    return;
+  }
+  if (bitrate.busy) return;
+  const key = `${ctx.token}|${ctx.index}|${ctx.plan.mode}|${player.session || ''}|${current.getAttribute('src')}`;
+  if (key !== bitrate.key) Object.assign(bitrate, { key, source: '', detail: null, declared: 0 }, bitrate.meter.reset());
+  const local = String(ctx.url || '').startsWith('file:') || String(ctx.url || '').startsWith('/');
+  bitrate.busy = true;
+  try {
+    const now = performance.now();
+    if (player.engine === 'mpv') {
+      const stats = await invoke('mpv_stats', { surface: 'main' });
+      if (key !== bitrate.key) return;
+      const stream = (stats.videoBitrate || 0) + (stats.audioBitrate || 0);
+      bitrate.detail = { video: stats.videoBitrate, audio: stats.audioBitrate, dropped: stats.droppedFrames };
+      if (!local && Number.isFinite(stats.cacheSpeed)) { bitrate.source = 'network'; bitrate.meter.rate(stats.cacheSpeed * 8, now); }
+      else if (stream > 0) { bitrate.source = 'stream'; bitrate.meter.rate(stream, now); }
+    } else if (player.session) {
+      const status = await invoke('stream_status', { session: player.session });
+      if (key !== bitrate.key) return;
+      bitrate.source = ctx.plan.mode === 'transcode' ? 'converted' : 'network';
+      bitrate.meter.counter(status.bytes, now);
+    } else {
+      const decoded = (video.webkitVideoDecodedByteCount || 0) + (video.webkitAudioDecodedByteCount || 0);
+      const variant = quality.variants.find((item) => item.url === quality.selected);
+      if (decoded > 0) { bitrate.source = local ? 'stream' : 'decoded'; bitrate.meter.counter(decoded, now); }
+      else if (variant?.bandwidth) { bitrate.source = 'declared'; bitrate.declared = variant.bandwidth; }
+    }
+  } catch { /* engine switched or session closed: the next sample starts over */ } finally { bitrate.busy = false; }
+  renderBitrate();
+}
+setInterval(sampleBitrate, 1000);
+
 // ---------- Catalogue ----------
 
 function rebuildCatalog() {
   const every = state.library.playlists.flatMap((playlist) => playlist.channels || []);
   const all = dedupeByUrl(every);
   catalog = { all, byUrl: new Map(all.map((channel) => [channel.streamUrl, channel])), byId: new Map(every.map((channel) => [channel.id, channel])) };
+  catalogVersion += 1;
 }
 async function refreshLibrary() {
   state.library = await invoke('get_library');
   rebuildCatalog();
   render();
 }
+const VIDEO_FILE = /\.(mp4|m4v|mov|mkv|avi|webm|wmv|flv|mpe?g)(?:[?#]|$)/i;
+/** Kind of a recent address that is no longer in a playlist: a file or a film can be sought. */
+function recentKind(item) {
+  if (item.url.includes('/episode/')) return 'episode';
+  if (item.url.startsWith('file:') || (VIDEO_FILE.test(item.url) && !/\.m3u8?(?:[?#]|$)/i.test(item.url))) return 'movie';
+  return 'live';
+}
 function sortedMedia(channels) { return [...channels].sort((a, b) => a.name.localeCompare(b.name, 'fr', { numeric: true, sensitivity: 'base' })); }
 function currentChannels() {
   const { library } = state;
   switch (state.view) {
     case 'recent':
-      return library.recent.map((item) => catalog.byUrl.get(item.url) || ({ id: `recent|${item.url}`, name: item.name, group: 'Récents', streamUrl: item.url, kind: item.url.includes('/episode/') ? 'episode' : 'live', containerExtension: item.containerExtension }));
+      return library.recent.map((item) => catalog.byUrl.get(item.url) || ({ id: `recent|${item.url}`, name: item.name, group: 'Récents', streamUrl: item.url, kind: recentKind(item), containerExtension: item.containerExtension }));
     case 'favorites':
       return library.favorites.map((id) => catalog.byId.get(id)).filter(Boolean);
     case 'continue':
@@ -369,24 +488,44 @@ function viewTitle() {
 }
 function activeFilterCount() { return [state.country, state.language, state.hideOffline].filter(Boolean).length + (state.library.hiddenGroups.length ? 1 : 0); }
 
+// Channels of the view before the category and search filters: they give the category counts.
+// Typing in the search box re-renders the list but leaves this list unchanged.
+let catalogVersion = 0;
+let healthVersion = 0;
+const groupBaseCache = { key: '', list: [] };
+function groupBase() {
+  const compute = () => filterChannels(currentChannels(), filterOptions({ group: 'Tous', query: '' }));
+  if (viewKeepsHidden()) return compute();
+  const key = [state.view, catalogVersion, state.country, state.language, state.library.hiddenGroups.join('\u0001'), state.hideOffline ? healthVersion : 0].join('|');
+  if (groupBaseCache.key !== key) Object.assign(groupBaseCache, { key, list: compute() });
+  return groupBaseCache.list;
+}
+
 let lastList = [];
 function render() {
   document.querySelectorAll('.main-nav button').forEach((el) => el.classList.toggle('active', el.dataset.view === state.view));
   const playlistNav = $('playlistNav'); playlistNav.replaceChildren();
   for (const playlist of state.library.playlists) {
-    const el = make('button', state.view === playlist.id ? 'active' : '', playlist.name);
-    el.title = `${playlist.name}\nDouble-cliquez pour renommer`; el.onclick = () => setView(playlist.id); el.ondblclick = () => renamePlaylist(playlist);
-    playlistNav.append(el);
+    const row = make('div', `playlist-item${state.view === playlist.id ? ' active' : ''}`);
+    const el = make('button', 'playlist-name', playlist.name);
+    el.title = `${playlist.name}\nDouble-cliquez pour renommer · clic droit pour plus d’actions`; el.onclick = () => setView(playlist.id); el.ondblclick = () => renamePlaylist(playlist);
+    const more = iconButton('ellipsis', `Actions pour ${playlist.name}`, 'playlist-more', (event) => { event.stopPropagation(); showPlaylistMenu(playlist, event.currentTarget); });
+    more.setAttribute('aria-haspopup', 'menu');
+    row.oncontextmenu = (event) => { event.preventDefault(); showPlaylistMenu(playlist, { x: event.clientX, y: event.clientY }); };
+    row.append(el, more);
+    playlistNav.append(row);
   }
   $('viewTitle').textContent = viewTitle();
   $('renameView').hidden = !currentPlaylist();
-  renderGroups(filterChannels(currentChannels(), filterOptions({ group: 'Tous', query: '' })));
+  $('exportView').hidden = !currentPlaylist();
+  renderGroups(groupBase());
   const count = activeFilterCount();
-  $('filtersButton').textContent = count ? `Filtres · ${count}` : 'Filtres';
+  $('filtersButton').lastChild.textContent = count ? `Filtres · ${count}` : 'Filtres';
   $('filtersButton').classList.toggle('selected', count > 0);
   const channels = filteredChannels();
   lastList = channels;
-  $('channelCount').textContent = `${channels.length} élément${channels.length > 1 ? 's' : ''}`;
+  $('channelCount').textContent = channels.length.toLocaleString('fr-FR');
+  $('channelCount').title = `${channels.length.toLocaleString('fr-FR')} élément${channels.length > 1 ? 's' : ''} affiché${channels.length > 1 ? 's' : ''}`;
   const guideView = state.view === 'guide';
   document.querySelector('.content').classList.toggle('guide-mode', guideView);
   $('channels').hidden = guideView;
@@ -402,10 +541,10 @@ function renderList(channels) {
   if (!channels.length) {
     const empty = make('div', 'list-empty');
     const hasPlaylists = state.library.playlists.length > 0;
-    const emptyText = state.view === 'continue' ? ['↻', 'Rien à reprendre', 'Les films, épisodes et vidéos commencés apparaîtront ici.']
-      : hasPlaylists ? ['⌕', 'Aucun résultat', 'Essayez une autre recherche, un autre groupe ou retirez des filtres.']
-        : ['＋', 'Ajoutez votre première playlist', 'Importez un fichier M3U ou collez son adresse pour afficher vos chaînes.'];
-    empty.append(make('div', 'empty-icon', emptyText[0]), make('strong', '', emptyText[1]), make('p', '', emptyText[2]));
+    const emptyText = state.view === 'continue' ? ['play-circle', 'Rien à reprendre', 'Les films, épisodes et vidéos commencés apparaîtront ici.']
+      : hasPlaylists ? ['search', 'Aucun résultat', 'Essayez une autre recherche, un autre groupe ou retirez des filtres.']
+        : ['plus', 'Ajoutez votre première playlist', 'Importez un fichier M3U ou collez son adresse pour afficher vos chaînes.'];
+    empty.append(emptyIcon(emptyText[0]), make('strong', '', emptyText[1]), make('p', '', emptyText[2]));
     if (!hasPlaylists) empty.append(button('Ajouter une playlist', 'primary', showAddPlaylist));
     list.append(empty);
     return;
@@ -451,15 +590,15 @@ function channelRow(channel, index) {
     row.append(dot);
   }
   if (state.view === 'favorites') {
-    row.append(button('↑', 'row-action', () => moveFavorite(channel.id, -1)), button('↓', 'row-action', () => moveFavorite(channel.id, 1)));
+    row.append(iconButton('arrow-up', 'Monter', 'row-action', () => moveFavorite(channel.id, -1)), iconButton('arrow-down', 'Descendre', 'row-action', () => moveFavorite(channel.id, 1)));
   }
   if (state.view === 'continue') {
-    const remove = button('×', 'row-action', async () => { state.library.progress = await invoke('clear_progress', { url: channel.streamUrl }); render(); });
-    remove.title = 'Retirer de la liste'; row.append(remove);
+    row.append(iconButton('x', 'Retirer de la liste', 'row-action', async () => { state.library.progress = await invoke('clear_progress', { url: channel.streamUrl }); render(); }));
   }
   if (!['recent', 'continue'].includes(state.view)) {
-    const favorite = make('button', 'star', state.library.favorites.includes(channel.id) ? '★' : '☆');
-    favorite.title = 'Favori'; favorite.setAttribute('aria-label', 'Favori'); favorite.onclick = () => toggleFavorite(channel.id);
+    const favorite = iconButton('star', 'Favori', 'star', () => toggleFavorite(channel.id));
+    favorite.classList.toggle('on', state.library.favorites.includes(channel.id));
+    favorite.setAttribute('aria-pressed', String(favorite.classList.contains('on')));
     row.append(favorite);
   }
   const cached = nowNextCache.get(channel.id);
@@ -537,10 +676,8 @@ function groupOption(group, count, label = group) {
   option.append(main);
   if (group !== 'Tous') {
     const isPinned = preferences.pinnedGroups.includes(group);
-    const pin = button('📌', `group-pin${isPinned ? ' on' : ''}`, (event) => { event.stopPropagation(); togglePinnedGroup(group); $('groupSearch').focus(); });
+    const pin = iconButton(isPinned ? 'pin-off' : 'pin', isPinned ? 'Retirer des raccourcis' : 'Épingler dans les raccourcis', `group-pin${isPinned ? ' on' : ''}`, (event) => { event.stopPropagation(); togglePinnedGroup(group); $('groupSearch').focus(); });
     pin.tabIndex = -1;
-    pin.title = isPinned ? 'Retirer des raccourcis' : 'Épingler dans les raccourcis';
-    pin.setAttribute('aria-label', pin.title);
     option.append(pin);
   }
   groupPanel.items.push({ group, el: option });
@@ -637,6 +774,8 @@ function requestNowNext(channels) {
     try {
       const result = await invoke('get_now_next', { references });
       const at = Date.now();
+      // Long browsing sessions would otherwise keep an entry for every channel ever shown.
+      if (nowNextCache.size > 6000) [...nowNextCache.keys()].slice(0, 2000).forEach((key) => nowNextCache.delete(key));
       for (const reference of references) {
         const value = result[reference.key] || null;
         nowNextCache.set(reference.key, { at, value });
@@ -678,6 +817,7 @@ async function checkVisibleChannels() {
 let healthRenderTimer = 0;
 listen('health', (event) => {
   for (const item of event.payload) state.health[item.url] = { ok: item.ok, message: item.message, checkedAt: item.checkedAt };
+  healthVersion += 1;
   if (!healthRenderTimer) {
     healthRenderTimer = setTimeout(() => {
       healthRenderTimer = 0;
@@ -699,11 +839,21 @@ listen('health-done', () => { if (state.hideOffline) render(); }).catch(() => {}
 
 function updateFavoriteButton() {
   $('favoriteButton').hidden = !state.playing?.channelId;
-  if (state.playing?.channelId) $('favoriteButton').textContent = state.library.favorites.includes(state.playing.channelId) ? '★' : '☆';
+  if (state.playing?.channelId) {
+    const on = state.library.favorites.includes(state.playing.channelId);
+    $('favoriteButton').classList.toggle('on', on);
+    $('favoriteButton').title = on ? 'Retirer des favoris' : 'Ajouter aux favoris';
+    $('favoriteButton').setAttribute('aria-label', $('favoriteButton').title);
+  }
 }
 async function toggleFavorite(id) {
-  try { state.library.favorites = await invoke('toggle_favorite', { id }); render(); }
-  catch (error) { toast(errorMessage(error), 'error'); }
+  try {
+    state.library.favorites = await invoke('toggle_favorite', { id });
+    if (state.view === 'favorites') { render(); return; }
+    const on = state.library.favorites.includes(id);
+    document.querySelectorAll(`.channel-row[data-id="${CSS.escape(id)}"] .star`).forEach((el) => { el.classList.toggle('on', on); el.setAttribute('aria-pressed', String(on)); });
+    updateFavoriteButton();
+  } catch (error) { toast(errorMessage(error), 'error'); }
 }
 async function moveFavorite(id, delta) {
   const favorites = [...state.library.favorites];
@@ -854,7 +1004,7 @@ async function renderPrograms(channel) {
         for (const program of finished) {
           const row = make('div', 'program replayable');
           const day = new Date(program.start * 1000).toLocaleDateString('fr-FR', { weekday: 'short' });
-          row.append(make('span', 'program-time', `${day} ${clock(program.start)}`), make('div', 'program-text'), button('▶ Revoir', 'subtle small', () => playCatchup(channel, program)));
+          row.append(make('span', 'program-time', `${day} ${clock(program.start)}`), make('div', 'program-text'), withIcon(button('Revoir', 'subtle small', () => playCatchup(channel, program)), 'play'));
           row.children[1].append(make('strong', '', program.title), make('small', '', program.description));
           box.append(row);
         }
@@ -878,7 +1028,7 @@ async function renderGuide(channels) {
   const request = ++guideRequest;
   if (!state.epg.programs) {
     container.replaceChildren(make('div', 'list-empty'));
-    container.firstChild.append(make('div', 'empty-icon', '☷'), make('strong', '', state.epg.loading ? 'Chargement du guide…' : 'Aucun guide TV'), make('p', '', 'Ajoutez un guide XMLTV dans Sources & guide TV, ou importez une playlist qui en annonce un.'));
+    container.firstChild.append(emptyIcon('guide'), make('strong', '', state.epg.loading ? 'Chargement du guide…' : 'Aucun guide TV'), make('p', '', 'Ajoutez un guide XMLTV dans Sources & guide TV, ou importez une playlist qui en annonce un.'));
     return;
   }
   const now = Math.floor(Date.now() / 1000);
@@ -889,7 +1039,7 @@ async function renderGuide(channels) {
   const rows = live.filter((channel) => result[channel.id]).slice(0, 150).map((channel) => ({ channel, programs: result[channel.id] }));
   if (!rows.length) {
     container.replaceChildren(make('div', 'list-empty'));
-    container.firstChild.append(make('div', 'empty-icon', '☷'), make('strong', '', 'Aucun programme pour ces chaînes'), make('p', '', 'Le guide chargé ne couvre pas les chaînes de cette sélection. Essayez un autre groupe ou pays.'));
+    container.firstChild.append(emptyIcon('guide'), make('strong', '', 'Aucun programme pour ces chaînes'), make('p', '', 'Le guide chargé ne couvre pas les chaînes de cette sélection. Essayez un autre groupe ou pays.'));
     return;
   }
   renderGuideGrid(container, {
@@ -937,7 +1087,14 @@ async function showEpisodes(channel) {
 
 // ---------- Fenêtres modales ----------
 
-function modal(title, build) { $('modalTitle').textContent = title; const body = $('modalBody'); body.replaceChildren(); build(body); $('modal').hidden = false; scheduleYoutubeBounds(); const first = body.querySelector('input'); first?.focus(); }
+function modal(title, build, { wide = false } = {}) {
+  closePopupMenu();
+  $('modalTitle').textContent = title;
+  document.querySelector('.modal').classList.toggle('wide', wide);
+  const body = $('modalBody'); body.replaceChildren(); build(body);
+  $('modal').hidden = false; scheduleYoutubeBounds();
+  body.querySelector('input:not([type=checkbox])')?.focus();
+}
 function closeModal() { $('modal').hidden = true; scheduleYoutubeBounds(); }
 function field(labelText, placeholder, value = '') { const label = make('label', 'field'); label.append(make('span', '', labelText)); const input = document.createElement('input'); input.placeholder = placeholder; input.value = value; label.append(input); return { label, input }; }
 let pasteFieldCount = 0;
@@ -1023,6 +1180,7 @@ function showPlayUrl() {
   modal('Lire une URL', (body) => {
     body.append(make('p', 'modal-intro', 'Ouvrez un flux HLS, MPEG-TS, une vidéo, un fichier audio ou une playlist M3U en ligne.'));
     const source = pasteField('Adresse du média', 'https://…/video.m3u8'); body.append(source.label);
+    source.input.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); body.querySelector('.primary')?.click(); } };
     body.append(button('Ouvrir l’adresse', 'primary full', async (event) => {
       const value = source.input.value.trim();
       if (!/^https?:\/\//i.test(value)) { toast('Entrez une adresse HTTP ou HTTPS.', 'error'); return; }
@@ -1064,13 +1222,349 @@ function renamePlaylist(playlist, after) {
   $('modalBody').querySelector('input')?.select();
 }
 
+// ---------- Menu des playlists ----------
+// « … » à côté de chaque playlist (ou clic droit) : renommer, exporter, actualiser, supprimer.
+
+let popupMenu = null;
+function closePopupMenu() { popupMenu?.remove(); popupMenu = null; }
+/** Small menu next to `anchor` (an element or a point); items are [icon, label, action, danger]. */
+function showMenu(items, anchor) {
+  closePopupMenu();
+  const menu = make('div', 'popup-menu');
+  menu.setAttribute('role', 'menu');
+  for (const [name, label, action, danger] of items) {
+    const item = withIcon(button(label, `popup-item${danger ? ' danger' : ''}`, () => { closePopupMenu(); action(); }), name);
+    item.setAttribute('role', 'menuitem');
+    menu.append(item);
+  }
+  menu.onkeydown = (event) => {
+    const entries = [...menu.querySelectorAll('button')];
+    const index = entries.indexOf(document.activeElement);
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      entries[(index + (event.key === 'ArrowDown' ? 1 : -1) + entries.length) % entries.length]?.focus();
+    } else if (event.key === 'Escape') { event.stopPropagation(); closePopupMenu(); }
+  };
+  document.body.append(menu);
+  const rect = anchor instanceof Element ? anchor.getBoundingClientRect() : { left: anchor.x, top: anchor.y, bottom: anchor.y };
+  const { offsetWidth: width, offsetHeight: height } = menu;
+  menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))}px`;
+  menu.style.top = `${rect.bottom + height + 8 > window.innerHeight ? Math.max(8, rect.top - height - 4) : rect.bottom + 4}px`;
+  popupMenu = menu;
+  menu.querySelector('button')?.focus();
+}
+document.addEventListener('pointerdown', (event) => { if (popupMenu && !popupMenu.contains(event.target)) closePopupMenu(); }, true);
+window.addEventListener('blur', closePopupMenu);
+window.addEventListener('resize', closePopupMenu);
+
+function showPlaylistMenu(playlist, anchor) {
+  showMenu([
+    ['edit', 'Renommer…', () => renamePlaylist(playlist)],
+    ['download', 'Exporter en M3U…', () => showExport([playlist.id])],
+    ['refresh', 'Actualiser', () => refreshPlaylist(playlist)],
+    ['trash', 'Supprimer…', () => removePlaylist(playlist), true],
+  ], anchor);
+}
+async function refreshPlaylist(playlist) {
+  toast(`Actualisation de « ${playlist.name} »…`);
+  try {
+    const updated = await invoke('refresh_playlist', { id: playlist.id });
+    await refreshLibrary();
+    toast(`${updated.channels.length} médias actualisés.`);
+  } catch (error) { toast(errorMessage(error), 'error'); }
+}
+async function removePlaylist(playlist, after) {
+  if (!window.confirm(`Supprimer « ${playlist.name} » ?`)) return;
+  try {
+    await invoke('remove_playlist', { id: playlist.id });
+    if (playlist.id === 'local-media') { clearQueue(); if (state.playing?.url.startsWith('file:')) state.playing.channelId = null; }
+    if (state.view === playlist.id) state.view = 'all';
+    await refreshLibrary();
+    after?.();
+  } catch (error) { toast(errorMessage(error), 'error'); }
+}
+
+// ---------- Export M3U ----------
+
+function fileNameOf(path = '') { return String(path).split(/[\\/]/).pop(); }
+function safeFileName(name) { return name.replace(/[\\/:*?"<>|]+/g, '-').replace(/^[.\s]+/, '').trim() || 'Playlist'; }
+
+function showExport(preselected = []) {
+  const playlists = state.library.playlists;
+  if (!playlists.length) { toast('Ajoutez d’abord une playlist.', 'error'); return; }
+  const chosen = new Set(preselected.length ? preselected : playlists.map((playlist) => playlist.id));
+  const xtream = new Set(state.library.xtreamAccounts.map((account) => account.id));
+  let separate = false;
+  modal('Exporter en M3U', (body) => {
+    body.append(make('p', 'modal-intro', 'Créez une playlist M3U lisible par VLC, Kodi, TiviMate ou une autre application. Groupes, logos, identifiants du guide TV et en-têtes HTTP sont conservés.'));
+    const list = make('div', 'check-list');
+    const note = make('p', 'muted');
+    const mode = selectField('Fichiers créés', [['merge', 'Un seul fichier (adresses en double retirées)'], ['separate', 'Un fichier par playlist, dans un dossier']], 'merge', (value) => { separate = value === 'separate'; });
+    const run = withIcon(button('Exporter…', 'primary full', () => runExport(run)), 'download');
+    const result = make('div', 'export-result');
+    const refresh = () => {
+      list.replaceChildren(checkboxField(`Toutes les playlists (${playlists.length})`, chosen.size === playlists.length, (checked) => {
+        chosen.clear();
+        if (checked) playlists.forEach((playlist) => chosen.add(playlist.id));
+        refresh();
+      }));
+      list.firstChild.classList.add('check-all');
+      for (const playlist of playlists) {
+        const count = playlist.channels.length;
+        list.append(checkboxField(`${playlist.name} · ${count.toLocaleString('fr-FR')} média${count > 1 ? 's' : ''}`, chosen.has(playlist.id), (checked) => {
+          if (checked) chosen.add(playlist.id); else chosen.delete(playlist.id);
+          refresh();
+        }));
+      }
+      mode.hidden = chosen.size < 2;
+      run.disabled = chosen.size === 0;
+      const warnings = [];
+      if ([...chosen].some((id) => xtream.has(id))) warnings.push('Les adresses Xtream exportées contiennent votre identifiant et votre mot de passe : ne partagez pas ce fichier. Les séries n’ont pas d’adresse propre et ne sont pas exportées.');
+      if (chosen.has('local-media')) warnings.push('Les médias locaux sont exportés avec leur chemin sur ce Mac.');
+      note.textContent = warnings.join(' ');
+      note.hidden = !warnings.length;
+    };
+    const runExport = async (target) => {
+      const ids = playlists.filter((playlist) => chosen.has(playlist.id)).map((playlist) => playlist.id);
+      if (!ids.length) return;
+      const split = separate && ids.length > 1;
+      const first = playlists.find((playlist) => playlist.id === ids[0]);
+      let destination;
+      try {
+        destination = split
+          ? await open({ directory: true, multiple: false, title: 'Dossier des fichiers M3U' })
+          : await save({ title: 'Exporter en M3U', defaultPath: `${safeFileName(ids.length === 1 ? first.name : 'Fluxo')}.m3u`, filters: [{ name: 'Playlist M3U', extensions: ['m3u', 'm3u8'] }] });
+      } catch (error) { toast(errorMessage(error), 'error'); return; }
+      if (!destination) return;
+      target.disabled = true; target.lastChild.textContent = 'Exportation…';
+      try {
+        const outcome = await invoke('export_m3u', { request: { playlists: ids, destination, separate: split } });
+        const summary = `${outcome.channels.toLocaleString('fr-FR')} média${outcome.channels > 1 ? 's' : ''} exporté${outcome.channels > 1 ? 's' : ''}${outcome.skipped ? ` · ${outcome.skipped} ignoré${outcome.skipped > 1 ? 's' : ''} (séries, adresses introuvables)` : ''}.`;
+        result.replaceChildren(make('strong', '', summary));
+        for (const file of outcome.files) {
+          const row = make('div', 'settings-row'); const info = make('div');
+          info.append(make('strong', '', fileNameOf(file)), make('small', '', file));
+          row.append(info, iconButton('folder-open', 'Afficher dans le Finder', 'icon-button', () => revealItemInDir(file).catch((error) => toast(errorMessage(error), 'error'))));
+          result.append(row);
+        }
+        toast(summary);
+      } catch (error) { toast(errorMessage(error), 'error'); }
+      finally { target.disabled = chosen.size === 0; target.lastChild.textContent = 'Exporter…'; }
+    };
+    body.append(list, mode, note, run, result);
+    refresh();
+  });
+}
+
+// ---------- Convertisseur ----------
+// Les conversions tournent dans Fluxo (FFmpeg, une à la fois) : la fenêtre peut être fermée.
+
+const MEDIA_EXTENSIONS = ['mp4', 'm4v', 'mov', 'mkv', 'avi', 'wmv', 'asf', 'flv', 'f4v', 'webm', 'ts', 'm2ts', 'mts', 'mpg', 'mpeg', 'vob', '3gp', '3g2', 'ogv', 'divx', 'rm', 'rmvb', 'mxf', 'dv', 'mp3', 'm4a', 'aac', 'wav', 'aiff', 'aif', 'flac', 'ogg', 'opus', 'wma', 'ac3', 'mka'];
+const CONVERT_HEIGHTS = [['', 'Taille d’origine'], ['2160', '4K (2160p) au plus'], ['1440', '1440p au plus'], ['1080', '1080p au plus'], ['720', '720p au plus'], ['480', '480p au plus']];
+const CONVERT_QUALITIES = [['high', 'Haute (fichiers plus gros)'], ['standard', 'Standard'], ['small', 'Compacte (fichiers plus petits)']];
+const converter = (() => {
+  const defaults = { preset: 'mp4-h264', height: '', quality: 'standard', hardware: true };
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('fluxo-converter') || '{}'); } catch { /* private storage */ }
+  return { settings: { ...defaults, ...saved }, jobs: new Map(), catalog: null, files: [], outputDir: null, view: null };
+})();
+function saveConverterSettings() { try { localStorage.setItem('fluxo-converter', JSON.stringify(converter.settings)); } catch { /* private storage */ } }
+function converterVisible() { return Boolean(converter.view?.root.isConnected && !$('modal').hidden); }
+function updateConverterBadge() {
+  const active = [...converter.jobs.values()].filter((job) => job.status === 'queued' || job.status === 'running').length;
+  $('converterBadge').hidden = active === 0;
+  $('converterBadge').textContent = String(active);
+  $('converterButton').title = active ? `${active} conversion${active > 1 ? 's' : ''} en cours` : 'Convertir des vidéos et fichiers audio';
+}
+listen('convert', (event) => {
+  const job = event.payload;
+  const previous = converter.jobs.get(job.id);
+  converter.jobs.set(job.id, job);
+  updateConverterBadge();
+  if (converterVisible()) { converter.view.update(job); return; }
+  if (previous && previous.status !== job.status) {
+    if (job.status === 'done') toast(`Conversion terminée : ${fileNameOf(job.output)}`);
+    else if (job.status === 'failed') toast(`Conversion de ${job.name} impossible. ${job.error || ''}`, 'error');
+  }
+}).catch(() => {});
+
+function jobStatusText(job) {
+  switch (job.status) {
+    case 'queued': return 'En attente';
+    case 'running': {
+      if (!job.progress) return job.bytes ? `Conversion… ${formatBytes(job.bytes)} écrits` : 'Analyse et démarrage…';
+      const parts = [`${Math.floor(job.progress * 100)} %`];
+      if (job.speed) parts.push(`${job.speed.toLocaleString('fr-FR', { maximumFractionDigits: 1 })}× le temps réel`);
+      if (Number.isFinite(job.eta)) parts.push(`reste ${timeText(job.eta)}`);
+      return parts.join(' · ');
+    }
+    case 'done': return `Terminé · ${formatBytes(job.bytes)}`;
+    case 'cancelled': return 'Annulée';
+    default: return job.error || 'La conversion a échoué.';
+  }
+}
+function jobRow(job) {
+  const row = make('div', `convert-job ${job.status}`);
+  row.dataset.id = String(job.id);
+  const info = make('div', 'convert-job-main');
+  info.append(make('strong', '', job.name), make('small', '', `${job.label.split(' — ')[0]} → ${fileNameOf(job.output)}`));
+  if (job.status === 'running' || job.status === 'queued') {
+    const bar = make('div', `progress-bar${job.status === 'running' && !job.progress ? ' indeterminate' : ''}`);
+    const fill = make('span'); fill.style.width = `${Math.round((job.progress || 0) * 1000) / 10}%`;
+    bar.append(fill); info.append(bar);
+  }
+  const status = make('small', 'convert-status', jobStatusText(job));
+  status.title = status.textContent;
+  info.append(status);
+  row.append(info);
+  if (job.status === 'queued' || job.status === 'running') {
+    row.append(iconButton('x', 'Annuler cette conversion', 'icon-button', () => invoke('convert_cancel', { id: job.id }).catch((error) => toast(errorMessage(error), 'error'))));
+  } else if (job.status === 'done') {
+    row.append(
+      iconButton('play', 'Lire dans Fluxo', 'icon-button', async () => { closeModal(); try { await importLocalMedia([job.output]); } catch (error) { toast(errorMessage(error), 'error'); } }),
+      iconButton('folder-open', 'Afficher dans le Finder', 'icon-button', () => revealItemInDir(job.output).catch((error) => toast(errorMessage(error), 'error'))),
+    );
+  }
+  return row;
+}
+
+async function showConverter(paths = []) {
+  converter.files = [...new Set([...converter.files, ...paths])];
+  if (!converter.catalog?.ffmpeg) converter.catalog = await invoke('convert_catalog').catch(() => ({ ffmpeg: false, presets: [] }));
+  const jobs = await invoke('convert_jobs').catch(() => null);
+  if (jobs) converter.jobs = new Map(jobs.map((job) => [job.id, job]));
+  updateConverterBadge();
+  const { settings, catalog } = converter;
+  modal('Convertisseur vidéo', (body) => {
+    const root = make('div', 'converter');
+    body.append(root);
+    if (!catalog.ffmpeg) {
+      root.append(make('p', 'info-message', 'FFmpeg est introuvable. Installez-le avec « brew install ffmpeg », puis relancez Fluxo.'));
+      converter.view = null;
+      return;
+    }
+    root.append(make('p', 'modal-intro', 'Convertissez vidéos et fichiers audio dans un autre format. Les conversions continuent en arrière-plan, une à la fois : vous pouvez fermer cette fenêtre. Le fichier d’origine n’est jamais modifié.'));
+
+    // Fichiers à convertir
+    const files = make('div', 'convert-files');
+    const drawFiles = () => {
+      files.replaceChildren();
+      if (!converter.files.length) files.append(make('p', 'muted', 'Aucun fichier choisi. Choisissez des fichiers ou glissez-les dans la fenêtre.'));
+      for (const path of converter.files) {
+        const row = make('div', 'convert-file');
+        const name = make('span', '', fileNameOf(path)); name.title = path;
+        row.append(icon('file-video'), name, iconButton('x', `Retirer ${fileNameOf(path)}`, 'row-action', () => { converter.files = converter.files.filter((item) => item !== path); drawFiles(); }));
+        files.append(row);
+      }
+      start.disabled = !converter.files.length;
+      start.lastChild.textContent = converter.files.length > 1 ? `Convertir ${converter.files.length} fichiers` : 'Convertir';
+    };
+    const pick = withIcon(button('Choisir des fichiers…', 'subtle full', async () => {
+      const picked = await open({ multiple: true, filters: [{ name: 'Vidéo et audio', extensions: MEDIA_EXTENSIONS }] }).catch(() => null);
+      if (!picked) return;
+      converter.view.addFiles(Array.isArray(picked) ? picked : [picked]);
+    }), 'folder-open');
+
+    // Réglages
+    const format = make('label', 'field'); format.append(make('span', '', 'Format de sortie'));
+    const select = document.createElement('select');
+    for (const [group, title] of [['video', 'Réencoder la vidéo'], ['copy', 'Sans réencodage (rapide)'], ['audio', 'Extraire le son']]) {
+      const optgroup = document.createElement('optgroup'); optgroup.label = title;
+      for (const preset of catalog.presets.filter((item) => item.group === group)) {
+        const option = document.createElement('option');
+        option.value = preset.id; option.disabled = !preset.available;
+        option.textContent = preset.available ? preset.label : `${preset.label} (indisponible)`;
+        optgroup.append(option);
+      }
+      select.append(optgroup);
+    }
+    if (!catalog.presets.some((preset) => preset.id === settings.preset && preset.available)) settings.preset = catalog.presets.find((preset) => preset.available)?.id || '';
+    select.value = settings.preset;
+    format.append(select);
+    const height = selectField('Définition', CONVERT_HEIGHTS, settings.height, (value) => { settings.height = value; saveConverterSettings(); });
+    const qualityField = selectField('Qualité', CONVERT_QUALITIES, settings.quality, (value) => { settings.quality = value; saveConverterSettings(); });
+    const hardware = checkboxField('Encodage matériel (VideoToolbox) : beaucoup plus rapide. L’encodeur logiciel prend le relais si la source est refusée.', settings.hardware, (checked) => { settings.hardware = checked; saveConverterSettings(); });
+    const settingsRow = make('div', 'field-row'); settingsRow.append(height, qualityField);
+    const describe = make('p', 'muted');
+    const applyPreset = () => {
+      const preset = catalog.presets.find((item) => item.id === settings.preset);
+      const reencode = preset?.group === 'video';
+      const lossless = ['flac', 'wav'].includes(preset?.id);
+      height.hidden = !reencode;
+      qualityField.hidden = !(reencode || (preset?.group === 'audio' && !lossless));
+      settingsRow.hidden = height.hidden && qualityField.hidden;
+      hardware.hidden = !(reencode && preset?.hardware);
+      describe.textContent = preset?.group === 'copy'
+        ? 'Les pistes sont copiées telles quelles : conversion en quelques secondes, sans perte. Si le conteneur refuse le son, il est converti en AAC.'
+        : preset?.id === 'gif' ? 'Le GIF est limité à 480 lignes par défaut et à 12 images par seconde : réservez-le aux courts extraits.'
+          : preset?.group === 'audio' ? 'Seule la première piste audio est conservée.' : '';
+      describe.hidden = !describe.textContent;
+    };
+    select.onchange = () => { settings.preset = select.value; saveConverterSettings(); applyPreset(); };
+
+    // Destination
+    const destination = make('div', 'settings-row convert-destination');
+    const drawDestination = () => {
+      const info = make('div');
+      info.append(make('strong', '', 'Destination'), make('small', '', converter.outputDir || 'À côté de chaque fichier d’origine'));
+      destination.replaceChildren(info, button('Choisir…', 'icon-button', async () => {
+        const dir = await open({ directory: true, multiple: false, title: 'Dossier des fichiers convertis' }).catch(() => null);
+        if (dir) { converter.outputDir = dir; drawDestination(); }
+      }));
+      if (converter.outputDir) destination.append(iconButton('x', 'Enregistrer à côté des fichiers d’origine', 'icon-button', () => { converter.outputDir = null; drawDestination(); }));
+    };
+
+    const start = withIcon(button('Convertir', 'primary full', async () => {
+      if (!converter.files.length || !settings.preset) return;
+      start.disabled = true;
+      try {
+        const added = await invoke('convert_add', { paths: converter.files, options: { preset: settings.preset, height: settings.height ? Number(settings.height) : null, quality: settings.quality, hardware: settings.hardware, outputDir: converter.outputDir } });
+        for (const job of added) converter.view?.update(job);
+        converter.files = [];
+        drawFiles();
+        toast(`${added.length} conversion${added.length > 1 ? 's' : ''} ajoutée${added.length > 1 ? 's' : ''}.`);
+      } catch (error) { toast(errorMessage(error), 'error'); start.disabled = !converter.files.length; }
+    }), 'convert');
+
+    // Conversions
+    const jobsHead = make('div', 'convert-jobs-head');
+    const clear = button('Effacer les terminées', 'subtle small', async () => {
+      const remaining = await invoke('convert_clear').catch(() => null);
+      if (!remaining) return;
+      converter.jobs = new Map(remaining.map((job) => [job.id, job]));
+      drawJobs();
+    });
+    jobsHead.append(make('h3', 'settings-heading', 'Conversions'), clear);
+    const jobList = make('div', 'convert-jobs');
+    const drawJobs = () => {
+      jobList.replaceChildren();
+      const all = [...converter.jobs.values()];
+      if (!all.length) jobList.append(make('p', 'muted', 'Aucune conversion pour le moment.'));
+      for (const job of all) jobList.append(jobRow(job));
+      clear.hidden = !all.some((job) => ['done', 'failed', 'cancelled'].includes(job.status));
+    };
+
+    root.append(make('h3', 'settings-heading first', 'Fichiers'), files, pick, format, describe, settingsRow, hardware, destination, start, jobsHead, jobList);
+    converter.view = {
+      root,
+      addFiles(paths) { converter.files = [...new Set([...converter.files, ...paths])]; drawFiles(); },
+      update(job) {
+        const existing = jobList.querySelector(`.convert-job[data-id="${job.id}"]`);
+        if (existing) existing.replaceWith(jobRow(job)); else drawJobs();
+        clear.hidden = ![...converter.jobs.values()].some((item) => ['done', 'failed', 'cancelled'].includes(item.status));
+      },
+    };
+    drawFiles(); applyPreset(); drawDestination(); drawJobs();
+  }, { wide: true });
+}
+
 async function showSettings() {
   const [engine, epg] = await Promise.all([invoke('engine_info').catch(() => state.engine), invoke('epg_status').catch(() => state.epg)]);
   state.engine = engine;
   modal('Sources & guide TV', (body) => {
     body.append(make('p', 'modal-intro', 'Gérez vos playlists, comptes Xtream, le guide des programmes et le moteur de lecture.'));
-    body.append(button('＋ Ajouter une playlist M3U', 'subtle full', showAddPlaylist));
-    body.append(button('＋ Connecter Xtream Codes', 'subtle full', showAddXtream));
+    body.append(withIcon(button('Ajouter une playlist M3U', 'subtle full', showAddPlaylist), 'plus'));
+    body.append(withIcon(button('Connecter Xtream Codes', 'subtle full', showAddXtream), 'plus'));
 
     body.append(make('h3', 'settings-heading', 'Guide TV'));
     const epgField = pasteField('Guide XMLTV personnel', 'Adresse HTTPS ou fichier XML (.xml, .xml.gz)', state.library.epgSource || ''); body.append(epgField.label);
@@ -1114,12 +1608,15 @@ async function showSettings() {
     body.append(checkboxField('Vérifier automatiquement la disponibilité des chaînes affichées', preferences.autoCheck, (enabled) => { preferences.autoCheck = enabled; savePreferences(); }));
 
     body.append(make('h3', 'settings-heading', 'Playlists'));
+    if (state.library.playlists.length) body.append(withIcon(button('Exporter en M3U…', 'subtle full', () => showExport()), 'download'));
     for (const playlist of state.library.playlists) {
       const row = make('div', 'settings-row'); const info = make('div');
       info.append(make('strong', '', playlist.name), make('small', '', `${playlist.channels.length} média${playlist.channels.length > 1 ? 's' : ''}${playlist.epgUrl ? ' · guide TV inclus' : ''}`));
-      const rename = button('✎', 'icon-button', () => renamePlaylist(playlist, showSettings));
-      rename.title = 'Renommer'; rename.setAttribute('aria-label', `Renommer ${playlist.name}`);
-      row.append(info, rename, button('↻', 'icon-button', async () => { try { const updated = await invoke('refresh_playlist', { id: playlist.id }); await refreshLibrary(); toast(`${updated.channels.length} médias actualisés.`); } catch (error) { toast(errorMessage(error), 'error'); } }), button('×', 'icon-button danger', async () => { if (!window.confirm(`Supprimer « ${playlist.name} » ?`)) return; await invoke('remove_playlist', { id: playlist.id }); if (playlist.id === 'local-media') { clearQueue(); if (state.playing?.url.startsWith('file:')) state.playing.channelId = null; } if (state.view === playlist.id) state.view = 'all'; await refreshLibrary(); showSettings(); }));
+      row.append(info,
+        iconButton('edit', `Renommer ${playlist.name}`, 'icon-button', () => renamePlaylist(playlist, showSettings)),
+        iconButton('download', `Exporter ${playlist.name} en M3U`, 'icon-button', () => showExport([playlist.id])),
+        iconButton('refresh', `Actualiser ${playlist.name}`, 'icon-button', () => refreshPlaylist(playlist)),
+        iconButton('trash', `Supprimer ${playlist.name}`, 'icon-button danger', () => removePlaylist(playlist, showSettings)));
       body.append(row);
     }
 
@@ -1210,6 +1707,11 @@ async function showStreamInfo() {
       rows.push(['Décodage', mainMpv.info.hwdec && mainMpv.info.hwdec !== 'no' ? `Matériel (${mainMpv.info.hwdec})` : 'Logiciel']);
       rows.push(['Codecs lus par mpv', [mainMpv.info.videoCodec, mainMpv.info.audioCodec].filter(Boolean).join(' · ') || '—']);
     }
+    const shown = shownBitrate();
+    if (shown) rows.push(['Débit', `${shown.source === 'declared' ? '≈ ' : ''}${formatBitrate(shown.value)} · ${(BITRATE_SOURCES[shown.source] || '').toLowerCase()}`]);
+    if (bitrate.detail?.video || bitrate.detail?.audio) rows.push(['Débit vidéo · audio', `${formatBitrate(bitrate.detail.video)} · ${formatBitrate(bitrate.detail.audio)}`]);
+    if (bitrate.meter.total > 0) rows.push(['Données reçues', formatBytes(bitrate.meter.total)]);
+    if (bitrate.detail?.dropped) rows.push(['Images perdues', bitrate.detail.dropped.toLocaleString('fr-FR')]);
     if (probe?.encryption) rows.push(['Chiffrement', probe.encryption]);
     if (probe?.unsupported?.length) rows.push(['Non pris en charge par macOS', probe.unsupported.join(', ')]);
     const table = make('div', 'info-table');
@@ -1294,8 +1796,9 @@ async function showRecordings() {
       const row = make('div', 'settings-row'); const info = make('div');
       info.append(make('strong', '', file.name), make('small', '', `${sizeText(file.bytes)} · ${new Date(file.modified * 1000).toLocaleString('fr-FR')}`));
       row.append(info,
-        button('▶', 'icon-button', async () => { closeModal(); try { await importLocalMedia([file.path]); } catch (error) { toast(errorMessage(error), 'error'); } }),
-        button('Finder', 'icon-button', () => revealItemInDir(file.path).catch((error) => toast(errorMessage(error), 'error'))));
+        iconButton('play', 'Lire', 'icon-button', async () => { closeModal(); try { await importLocalMedia([file.path]); } catch (error) { toast(errorMessage(error), 'error'); } }),
+        iconButton('convert', 'Convertir dans un autre format', 'icon-button', () => showConverter([file.path])),
+        iconButton('folder-open', 'Afficher dans le Finder', 'icon-button', () => revealItemInDir(file.path).catch((error) => toast(errorMessage(error), 'error'))));
       body.append(row);
     }
   });
@@ -1307,11 +1810,22 @@ async function openMedia() {
   try { const paths = await open({ multiple: true, filters: [{ name: 'Audio et vidéo', extensions: ['mp4', 'm4v', 'mov', 'mp3', 'm4a', 'aac', 'wav', 'aiff', 'aif', 'webm', 'mkv', 'flac', 'ogg', 'opus', 'ts', 'm2ts', 'mts', 'avi', 'mpg', 'mpeg', 'wmv', 'flv'] }] }); if (!paths) return; await importLocalMedia(Array.isArray(paths) ? paths : [paths]); }
   catch (error) { toast(errorMessage(error), 'error'); }
 }
-async function importLocalMedia(paths) {
+/** Adds files and folders to « Médias locaux »; plays the first one, or with `append`, adds
+ * them after the media being played. */
+async function importLocalMedia(paths, { append = false } = {}) {
   $('dropOverlay').hidden = true;
   if (!paths.length) return;
   const result = await invoke('import_local_media', { paths });
-  await refreshLibrary(); setView(result.playlist.id);
+  await refreshLibrary();
+  if (append && state.queue.length) {
+    const known = new Set(state.queue.map((item) => item.streamUrl));
+    const added = sortedMedia(result.channels).filter((item) => !known.has(item.streamUrl));
+    state.queue.push(...added);
+    renderQueue();
+    toast(added.length ? `${added.length} média${added.length > 1 ? 's' : ''} ajouté${added.length > 1 ? 's' : ''} à la suite.` : 'Ces médias sont déjà dans la file.');
+    return;
+  }
+  setView(result.playlist.id);
   state.queue = sortedMedia(result.channels); state.queueIndex = 0; renderQueue();
   await playQueueIndex(0);
   const extra = result.truncated ? ' Limite de 500 médias atteinte.' : result.skipped ? ` ${result.skipped} fichier${result.skipped > 1 ? 's' : ''} ignoré${result.skipped > 1 ? 's' : ''}.` : '';
@@ -1319,6 +1833,75 @@ async function importLocalMedia(paths) {
 }
 
 // ---------- Commandes du lecteur ----------
+
+/** Stops the stream or the video and frees the connection; the queue is kept. */
+async function stopPlayback() {
+  if (!state.playing && !player.info) return;
+  saveProgressNow();
+  filmstrip.close();
+  player.stop();
+  resetQuality();
+  if (youtubeSession || !youtubePlayback.hidden) await hideYoutube();
+  state.playing = null;
+  state.subtitleCues = []; selectSubtitleTrack('off');
+  $('videoEmpty').hidden = false;
+  $('playingTitle').textContent = 'Aucune lecture';
+  $('playingDetail').textContent = 'La vidéo et l’audio se lisent ici.';
+  $('liveIndicator').textContent = 'LECTEUR';
+  for (const id of ['engineBadge', 'streamInfo', 'favoriteButton']) $(id).hidden = true;
+  $('playerStatus').textContent = ''; $('playerError').textContent = ''; openSourceExternally.hidden = true;
+  $('programs').replaceChildren(make('p', 'muted', 'Sélectionnez une chaîne pour voir son programme.'));
+  markPlayingRows(); updateRecordButton(); updateControls(); renderQueue();
+}
+
+function toggleFilmstrip() {
+  if (filmstrip.isOpen) { filmstrip.close(); return; }
+  if (!filmstripSource()) { toast('Le plan est disponible pour les films, épisodes et fichiers vidéo.'); return; }
+  if (!filmstrip.open()) toast('Le plan de cette vidéo n’est pas disponible.', 'error');
+  else if (!filmstripSource().local) toast('Les images sont prises sur le serveur du film : elles peuvent mettre quelques secondes à apparaître.');
+}
+
+// Preview above the seek bar: the time under the pointer and, once loaded, its picture.
+function seekPreviewAt(event) {
+  const current = media();
+  const duration = current.duration;
+  const seek = $('seek');
+  if (!Number.isFinite(duration) || duration <= 0 || seek.disabled) { $('seekPreview').hidden = true; return; }
+  const rect = seek.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  const time = ratio * duration;
+  const info = filmstripSource();
+  const frame = info ? filmstrip.preview(info.source, time) : null;
+  const preview = $('seekPreview');
+  const image = preview.firstChild;
+  image.hidden = !frame;
+  if (frame) image.style.backgroundImage = `url("${frame.image}")`;
+  preview.lastChild.textContent = timeText(time);
+  preview.hidden = false;
+  const host = $('playerControls').getBoundingClientRect();
+  const half = preview.offsetWidth / 2;
+  preview.style.left = `${Math.max(half + 4, Math.min(host.width - half - 4, event.clientX - host.left))}px`;
+}
+$('seek').addEventListener('pointerenter', () => filmstrip.prefetch());
+$('seek').addEventListener('pointermove', seekPreviewAt);
+$('seek').addEventListener('pointerleave', () => { $('seekPreview').hidden = true; });
+
+// In full screen and player mode, the controls and the pointer disappear after a few seconds
+// of playback without movement; any movement, key or pause brings them back.
+const IDLE_DELAY = 3000;
+let idleTimer = 0;
+function wakeControls() {
+  document.body.classList.remove('controls-idle');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    const current = media();
+    const immersive = document.body.classList.contains('native-fullscreen') || document.body.classList.contains('player-mode');
+    if (!immersive || current.paused || !current.getAttribute('src') || filmstrip.isOpen || !$('modal').hidden || popupMenu) return;
+    if ($('playerControls').matches(':hover') || $('playerControls').contains(document.activeElement) && document.activeElement !== document.body && document.activeElement.matches(':focus-visible')) return;
+    document.body.classList.add('controls-idle');
+  }, IDLE_DELAY);
+}
+for (const type of ['pointermove', 'pointerdown', 'keydown', 'wheel']) document.addEventListener(type, wakeControls, { passive: true });
 
 function updateControls() {
   const current = media();
@@ -1328,8 +1911,10 @@ function updateControls() {
   $('back10').disabled = !seekable; $('forward10').disabled = !seekable;
   $('seek').value = seekable ? Math.round(current.currentTime / duration * 1000) : 0;
   $('timeLabel').textContent = seekable ? `${timeText(current.currentTime)} / ${timeText(duration)}` : current.getAttribute('src') ? 'DIRECT' : '00:00 / 00:00';
-  $('togglePlay').textContent = current.paused ? '▶' : 'Ⅱ';
-  $('mute').textContent = current.muted || current.volume === 0 ? '◖×' : '◖))';
+  setIcon($('togglePlay'), current.paused ? 'play' : 'pause');
+  $('filmstripButton').hidden = !seekable || !filmstripSource();
+  if (filmstrip.isOpen) { if ($('filmstripButton').hidden) filmstrip.close(); else filmstrip.update(); }
+  setIcon($('mute'), current.muted || current.volume === 0 ? 'volume-off' : current.volume < 0.5 ? 'volume-low' : 'volume-high');
   $('volume').value = current.muted ? 0 : current.volume;
 }
 function togglePause() { const current = media(); if (current.paused) current.play()?.catch?.(() => {}); else current.pause(); }
@@ -1399,19 +1984,27 @@ function showPlayerOptions() {
     body.append(make('p', 'muted', 'Raccourcis : ↑/↓ chaîne précédente/suivante, chiffres pour aller à un numéro, ⌫ dernière chaîne, Espace lecture/pause, ←/→ ±10 s, M son, F plein écran, I infos du flux.'));
   });
 }
+function syncFullscreen(enabled) {
+  document.body.classList.toggle('native-fullscreen', enabled);
+  wakeControls();
+  setIcon($('fullscreen'), enabled ? 'fullscreen-exit' : 'fullscreen');
+  $('fullscreen').title = enabled ? 'Quitter le plein écran (F)' : 'Plein écran (F)';
+}
 async function toggleFullscreen() {
   try {
     const window = getCurrentWindow();
     const next = !(await window.isFullscreen());
     await window.setFullscreen(next);
-    document.body.classList.toggle('native-fullscreen', next);
+    syncFullscreen(next);
     scheduleYoutubeBounds();
   } catch (error) { toast(`Plein écran indisponible : ${errorMessage(error)}`, 'error'); }
 }
 function togglePlayerMode() {
   if (document.body.classList.contains('multiview-mode')) toggleMultiview();
   const enabled = document.body.classList.toggle('player-mode');
-  $('playerMode').textContent = enabled ? 'Afficher le catalogue' : 'Mode lecteur';
+  $('playerMode').lastChild.textContent = enabled ? 'Afficher le catalogue' : 'Mode lecteur';
+  wakeControls();
+  setIcon($('playerMode'), enabled ? 'player-mode-exit' : 'player-mode');
   scheduleYoutubeBounds();
 }
 
@@ -1430,7 +2023,7 @@ function toggleMultiview() {
   if (enabled && document.body.classList.contains('player-mode')) togglePlayerMode();
   document.body.classList.toggle('multiview-mode', enabled);
   $('multiview').hidden = !enabled;
-  $('multiviewMode').textContent = enabled ? 'Quitter la multivue' : 'Multivue';
+  $('multiviewMode').lastChild.textContent = enabled ? 'Quitter la multivue' : 'Multivue';
   if (enabled) {
     const current = player.info?.channel;
     multiviewResume = current && !player.info.catchup ? current : null;
@@ -1508,21 +2101,25 @@ $('updateLater').onclick = () => { $('updateBanner').hidden = true; };
 // ---------- Événements ----------
 
 getCurrentWindow().onResized(async () => {
-  document.body.classList.toggle('native-fullscreen', await getCurrentWindow().isFullscreen());
+  syncFullscreen(await getCurrentWindow().isFullscreen());
   scheduleYoutubeBounds();
 }).catch(() => {});
 new ResizeObserver(scheduleYoutubeBounds).observe($('videoWrap'));
 document.querySelector('.player-pane').addEventListener('scroll', scheduleYoutubeBounds, { passive: true });
 window.addEventListener('resize', scheduleYoutubeBounds);
 $('addPlaylistShortcut').onclick = showAddPlaylist; $('settingsButton').onclick = showSettings; $('recordingsButton').onclick = showRecordings;
+$('converterButton').onclick = () => showConverter();
 $('playUrl').onclick = showPlayUrl; $('openMedia').onclick = openMedia;
 $('playerMode').onclick = togglePlayerMode; $('multiviewMode').onclick = toggleMultiview;
 $('renameView').onclick = () => { const playlist = currentPlaylist(); if (playlist) renamePlaylist(playlist); };
+$('exportView').onclick = () => { const playlist = currentPlaylist(); if (playlist) showExport([playlist.id]); };
 $('filtersButton').onclick = showFilters; $('checkButton').onclick = () => checkVisibleChannels().catch((error) => toast(errorMessage(error), 'error'));
 $('queuePrevious').onclick = () => playQueueIndex(state.queueIndex - 1);
 $('queueNext').onclick = () => playQueueIndex(state.queueIndex + 1);
 $('queueClear').onclick = clearQueue;
 $('togglePlay').onclick = togglePause;
+$('stopPlayback').onclick = () => stopPlayback();
+$('filmstripButton').onclick = toggleFilmstrip;
 $('back10').onclick = () => seekBy(-10);
 $('forward10').onclick = () => seekBy(10);
 $('seek').oninput = (event) => { const current = media(); if (Number.isFinite(current.duration)) current.currentTime = Number(event.target.value) / 1000 * current.duration; };
@@ -1542,6 +2139,15 @@ $('pip').onclick = async () => {
   } catch (error) { toast(errorMessage(error), 'error'); }
 };
 $('videoWrap').ondblclick = (event) => { if (event.target === video || event.target === $('videoWrap')) toggleFullscreen(); };
+// A click on the picture (not on the controls) pauses or resumes, as in most players.
+let pictureClickTimer = 0;
+$('videoWrap').addEventListener('click', (event) => {
+  if ((event.target === video || event.target === $('videoWrap')) && media().getAttribute('src') && event.detail === 1) {
+    clearTimeout(pictureClickTimer);
+    pictureClickTimer = setTimeout(togglePause, 220);
+  }
+});
+$('videoWrap').addEventListener('dblclick', () => clearTimeout(pictureClickTimer));
 $('favoriteButton').onclick = () => state.playing?.channelId && toggleFavorite(state.playing.channelId);
 $('modalClose').onclick = closeModal; $('modal').onclick = (event) => { if (event.target === $('modal')) closeModal(); };
 let searchTimer = 0;
@@ -1551,7 +2157,11 @@ $('search').oninput = (event) => {
 };
 document.querySelectorAll('.main-nav button').forEach((el) => { el.onclick = () => setView(el.dataset.view); });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') { closeGroupPanel(); closeModal(); return; }
+  if (event.key === 'Escape') {
+    if (popupMenu) { closePopupMenu(); return; }
+    if (filmstrip.isOpen && $('modal').hidden) { filmstrip.close(); return; }
+    closeGroupPanel(); closeModal(); return;
+  }
   const target = event.target;
   if (!$('modal').hidden || event.metaKey || event.ctrlKey || event.altKey) return;
   if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
@@ -1563,6 +2173,8 @@ document.addEventListener('keydown', (event) => {
   if (key === 'Backspace' && state.previous) { event.preventDefault(); showZap(state.previous.name); playChannel(state.previous); return; }
   if (key.toLowerCase() === 'i' && player.info) { showStreamInfo(); return; }
   if (key.toLowerCase() === 'm') { toggleMute(); return; }
+  if (key.toLowerCase() === 's' && (state.playing || player.info)) { event.preventDefault(); stopPlayback(); return; }
+  if (key.toLowerCase() === 'p' && player.info) { event.preventDefault(); toggleFilmstrip(); return; }
   if (!hasMedia) return;
   if (key === ' ') { event.preventDefault(); togglePause(); }
   if (key.toLowerCase() === 'f') toggleFullscreen();
@@ -1573,16 +2185,48 @@ for (const target of [video, mainMpv]) {
   for (const name of ['timeupdate', 'loadedmetadata', 'durationchange', 'play', 'pause', 'volumechange', 'emptied']) {
     target.addEventListener(name, () => { if (target === media()) { updateControls(); renderSubtitles(); } });
   }
+  for (const name of ['play', 'pause']) {
+    target.addEventListener(name, () => { if (target === media()) wakeControls(); });
+  }
   target.addEventListener('ended', () => { if (target === media() && state.queueIndex >= 0 && state.queueIndex + 1 < state.queue.length) playQueueIndex(state.queueIndex + 1); });
 }
 video.textTracks?.addEventListener?.('addtrack', (event) => { event.track.mode = 'disabled'; event.track.addEventListener('cuechange', renderSubtitles); });
+/** Marks the zone under the pointer (physical pixels) and returns its action. */
+function highlightDropZone(position) {
+  const scale = window.devicePixelRatio || 1;
+  const x = (position?.x ?? -1) / scale;
+  const y = (position?.y ?? -1) / scale;
+  let action = null;
+  document.querySelectorAll('.drop-zone').forEach((zone) => {
+    const rect = zone.getBoundingClientRect();
+    const inside = !zone.hidden && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    zone.classList.toggle('active', inside);
+    if (inside) action = zone.dataset.action;
+  });
+  return action;
+}
 getCurrentWindow().onDragDropEvent(async (event) => {
   const { type } = event.payload;
-  if (type === 'enter') $('dropOverlay').hidden = !event.payload.paths?.length;
+  const converting = converterVisible();
+  if (type === 'enter') {
+    const count = event.payload.paths?.length || 0;
+    $('dropTitle').textContent = converting ? `Convertir ${count > 1 ? `ces ${count} éléments` : 'cet élément'}` : count > 1 ? `${count} éléments à déposer` : 'Déposez votre média';
+    $('dropDetail').textContent = converting ? 'Ils rejoignent la liste des fichiers à convertir.' : 'Choisissez l’action en déposant sur l’une des zones.';
+    document.querySelectorAll('.drop-zone').forEach((zone) => {
+      const action = zone.dataset.action;
+      zone.hidden = converting ? action !== 'convert' : action === 'queue' && !state.queue.length;
+    });
+    $('dropOverlay').classList.toggle('single', converting);
+    $('dropOverlay').hidden = !count;
+  }
+  if (type === 'enter' || type === 'over') highlightDropZone(event.payload.position);
   if (type === 'leave') $('dropOverlay').hidden = true;
   if (type === 'drop') {
+    const action = converting ? 'convert' : highlightDropZone(event.payload.position) || 'play';
     $('dropOverlay').hidden = true;
-    try { await importLocalMedia(event.payload.paths); }
+    const paths = event.payload.paths || [];
+    if (action === 'convert') { if (converting) converter.view.addFiles(paths); else showConverter(paths); return; }
+    try { await importLocalMedia(paths, { append: action === 'queue' }); }
     catch (error) { toast(errorMessage(error), 'error'); }
   }
   scheduleYoutubeBounds();
@@ -1598,6 +2242,7 @@ setInterval(() => { if (state.view === 'guide') render(); else if (state.epg.pro
     state.health = health;
     await refreshLibrary();
     await refreshEpgStatus();
+    invoke('convert_jobs').then((jobs) => { converter.jobs = new Map(jobs.map((job) => [job.id, job])); updateConverterBadge(); }).catch(() => {});
     if (engine.debugPlay) await playUrl(engine.debugPlay, 'Diagnostic');
     if (preferences.autoUpdate && Date.now() - lastUpdateCheck() > UPDATE_INTERVAL) checkForUpdates({ silent: true });
   } catch (error) { toast(errorMessage(error), 'error'); }

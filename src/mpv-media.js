@@ -26,7 +26,7 @@ export function trackElement(element, send, { clip } = {}) {
     if (!active) return;
     const rect = element.getBoundingClientRect();
     let bounds = rect.width >= 2 && rect.height >= 2 && element.isConnected
-      ? { x: rect.left, y: rect.top, width: rect.width, height: rect.height } : null;
+      ? { x: rect.left, y: rect.top, width: rect.width, height: rect.height, viewportHeight: window.innerHeight } : null;
     const limit = bounds && clip?.();
     if (limit && (rect.left < limit.left - 1 || rect.right > limit.right + 1 || rect.top < limit.top - 1 || rect.bottom > limit.bottom + 1)) bounds = null;
     const key = JSON.stringify(bounds);

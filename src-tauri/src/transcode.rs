@@ -188,7 +188,7 @@ fn playlist_ready(text: &str) -> bool {
 }
 
 /// Drops the `[encoder @ 0x…]` prefixes FFmpeg puts in front of its messages.
-fn clean_log_line(line: &str) -> &str {
+pub(crate) fn clean_log_line(line: &str) -> &str {
     let mut line = line.trim();
     while line.starts_with('[')
         && let Some(end) = line.find("] ")

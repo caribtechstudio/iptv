@@ -164,6 +164,27 @@ impl Recorder {
         }
     }
 
+    /// Asks every recording to finish and waits a little for FFmpeg to close its files, so
+    /// quitting Fluxo neither leaves a process running nor a truncated file.
+    pub fn stop_all(&self, timeout: Duration) {
+        let recordings: Vec<Arc<Recording>> = self
+            .recordings
+            .lock()
+            .map(|recordings| recordings.values().cloned().collect())
+            .unwrap_or_default();
+        for recording in &recordings {
+            recording.stop.store(true, Ordering::SeqCst);
+        }
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline
+            && recordings
+                .iter()
+                .any(|recording| recording.info.lock().is_ok_and(|info| info.active))
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     pub fn list(&self) -> Recordings {
         let active = self
             .recordings
@@ -421,7 +442,13 @@ fn record_with_ffmpeg(
             if let Some(stdin) = child.stdin.as_mut() {
                 let _ = stdin.write_all(b"q");
             }
-            std::thread::sleep(Duration::from_secs(2));
+            // FFmpeg usually closes the file at once; it is killed after two seconds.
+            for _ in 0..20 {
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
             let _ = child.kill();
             let _ = child.wait();
             return Ok(());
